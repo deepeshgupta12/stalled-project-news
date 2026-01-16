@@ -8,6 +8,7 @@ from .models import ProjectInput
 from .serp_pipeline import run_serp_search_with_debug, store_serp_run_with_debug
 from .evidence_pipeline import fetch_and_extract_from_serp
 from .event_extractor import extract_events_from_evidence, store_events
+from .news_generator import build_news_with_openai
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -31,6 +32,13 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--evidence", required=True, help="Path to evidence.json in artifacts run dir")
     e.add_argument("--min_conf", required=False, default="0.55", help="Minimum confidence threshold (default 0.55)")
 
+    n = sub.add_parser("render-news", help="Generate news.json + news.html using OpenAI (evidence-bounded)")
+    n.add_argument("--project_name", required=True)
+    n.add_argument("--city", required=True)
+    n.add_argument("--rera_id", required=False, default=None)
+    n.add_argument("--run_dir", required=True, help="Artifacts run dir containing events_deduped.json")
+    n.add_argument("--events", required=False, default="events_deduped.json")
+
     return p
 
 
@@ -40,19 +48,27 @@ def main() -> None:
 
     if args.command == "ping":
         cmd_ping()
-    elif args.command == "check-url":
+        return
+
+    if args.command == "check-url":
         cmd_check_url(args.url)
-    elif args.command == "serp-run":
+        return
+
+    if args.command == "serp-run":
         project = ProjectInput(project_name=args.project_name, city=args.city, rera_id=args.rera_id)
         run, all_debug, domain_counts, raw_debug = run_serp_search_with_debug(project)
         out_path = store_serp_run_with_debug(run, all_debug, domain_counts, raw_debug)
         print(f"stored: {out_path}")
         print(f"whitelisted_results: {run.results_whitelisted}")
-    elif args.command == "fetch-extract":
+        return
+
+    if args.command == "fetch-extract":
         p = Path(args.serp_results).expanduser().resolve()
         out = fetch_and_extract_from_serp(p)
         print(f"evidence_stored: {out}")
-    elif args.command == "extract-events":
+        return
+
+    if args.command == "extract-events":
         evp = Path(args.evidence).expanduser().resolve()
         min_conf = float(args.min_conf)
         raw, deduped = extract_events_from_evidence(evp, min_confidence=min_conf)
@@ -61,8 +77,25 @@ def main() -> None:
         print(f"events_deduped: {deduped_path}")
         print(f"timeline: {timeline_path}")
         print(f"raw_count={len(raw)} deduped_count={len(deduped)}")
-    else:
-        parser.error(f"Unknown command: {args.command}")
+        return
+
+    if args.command == "render-news":
+        project = ProjectInput(project_name=args.project_name, city=args.city, rera_id=args.rera_id)
+        run_dir = Path(args.run_dir).expanduser().resolve()
+        events_path = (run_dir / args.events).resolve()
+
+        news_json, news_html, inputs_json, raw_json = build_news_with_openai(
+            project=project,
+            run_dir=run_dir,
+            events_deduped_path=events_path,
+        )
+        print(f"news_json: {news_json}")
+        print(f"news_html: {news_html}")
+        print(f"news_inputs: {inputs_json}")
+        print(f"news_llm_raw: {raw_json}")
+        return
+
+    parser.error(f"Unknown command: {args.command}")
 
 
 if __name__ == "__main__":
