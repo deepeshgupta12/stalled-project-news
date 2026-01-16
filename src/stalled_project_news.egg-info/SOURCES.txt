@@ -4,6 +4,7 @@ src/stalled_news/__main__.py
 src/stalled_news/cli.py
 src/stalled_news/commands.py
 src/stalled_news/config.py
+src/stalled_news/whitelist.py
 src/stalled_project_news.egg-info/PKG-INFO
 src/stalled_project_news.egg-info/SOURCES.txt
 src/stalled_project_news.egg-info/dependency_links.txt

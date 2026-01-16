@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from rich import print
 
-from .config import load_config, repo_root
+from .config import load_config, repo_root, load_yaml
 from . import __version__
+from .whitelist import WhitelistPolicy, is_url_allowed
 
 
 def cmd_ping() -> None:
@@ -19,7 +20,6 @@ def cmd_ping() -> None:
     print(f"settings.yaml exists={settings_path.exists()}")
     print(f"whitelist.yaml exists={whitelist_path.exists()}")
 
-    # Key presence only (never print keys)
     print(f"OPENAI_API_KEY present={cfg.openai_api_key_present}")
     print(f"SERPAPI_API_KEY present={cfg.serpapi_api_key_present}")
 
@@ -33,3 +33,15 @@ def cmd_ping() -> None:
     artifacts_dir = (root / str(base_dir)).resolve()
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     print(f"artifacts_dir={artifacts_dir}")
+
+
+def cmd_check_url(url: str) -> None:
+    root = repo_root()
+    wl = load_yaml(root / "configs" / "whitelist.yaml")
+    domains = wl.get("domains", [])
+    sub_allowed = wl.get("subdomain_allowed", [])
+    policy = WhitelistPolicy.from_config(domains, sub_allowed)
+
+    allowed = is_url_allowed(url, policy)
+    print(f"url={url}")
+    print(f"allowed={allowed}")

@@ -1,8 +1,7 @@
 # Strict whitelist of allowed evidence sources (domains only, no paths)
-# IMPORTANT: Keep domains ONLY. The pipeline will reject everything else.
 
 domains:
-  # --- Square Yards + major real estate platforms (signals; medium trust unless official docs referenced) ---
+  # --- Square Yards + major real estate platforms ---
   - squareyards.com
   - housing.com
   - magicbricks.com
@@ -30,7 +29,7 @@ domains:
   - financialexpress.com
   - firstpost.com
   - india.com
-  - indiaToday.in
+  - indiatoday.in
   - aajtak.in
 
   # --- Real estate / infra focused publishers (India) ---
@@ -40,20 +39,24 @@ domains:
   - infrastructuretoday.co.in
   - smartcitiesindia.com
 
-  # --- Govt / regulator / statutory domains (India) ---
-  # NOTE: RERA portals vary state-wise. Add your exact state RERA domain(s) here.
+  # --- Govt / regulator / statutory (base domains) ---
   - gov.in
   - nic.in
 
   # --- Courts / legal information surfaces (India) ---
   - indiankanoon.org
 
-  # --- Global / additional business sources (optional, keep only if you want them) ---
+  # --- Global (optional) ---
   - reuters.com
   - bloomberg.com
 
-# Optional: domain trust ranking (higher = more trusted).
-# We will refine this once you share your final whitelist (esp. the exact RERA portal domain).
+# Allow subdomains ONLY for these parent domains.
+# Example: for gov.in we may accept https://maharera.maharashtra.gov.in (not under gov.in though),
+# but for "gov.in" itself we accept foo.gov.in when present.
+subdomain_allowed:
+  - gov.in
+  - nic.in
+
 trust_rank:
   gov.in: 100
   nic.in: 95

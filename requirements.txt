@@ -29,3 +29,4 @@ rich>=13.7.1
 
 # Tests
 pytest>=8.2.0
+idna>=3.7
