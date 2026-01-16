@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -24,18 +23,15 @@ _MONTHS = {
     "dec": "12", "december": "12",
 }
 
-
 DATE_PATTERNS: list[re.Pattern] = [
-    # 27-Jun-2022 or 27-Jun-22
-    re.compile(r"\b(\d{1,2})[-\s]([A-Za-z]{3,9})[-\s](\d{2,4})\b"),
-    # 25.04.2022 or 25/04/2022
-    re.compile(r"\b(\d{1,2})[./](\d{1,2})[./](\d{2,4})\b"),
-    # 2022-06-27
-    re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b"),
+    re.compile(r"\b(\d{1,2})[-\s]([A-Za-z]{3,9})[-\s](\d{2,4})\b"),     # 27-Jun-2022
+    re.compile(r"\b(\d{1,2})[./](\d{1,2})[./](\d{2,4})\b"),            # 25.04.2022
+    re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b"),                        # 2022-06-27
 ]
 
 KEYWORDS = {
     "registration suspended": 1.0,
+    "registra": 0.3,  # catch "registration" broadly
     "suspended": 0.8,
     "show-cause": 0.9,
     "show cause": 0.9,
@@ -44,12 +40,13 @@ KEYWORDS = {
     "adjournment": 0.6,
     "hearing": 0.5,
     "order": 0.6,
-    "certificate": 0.4,
-    "notice": 0.4,
+    "notice": 0.5,
     "extension": 0.6,
     "revoked": 0.8,
     "penalty": 0.7,
     "complaint": 0.5,
+    "non-compliance": 0.7,
+    "default": 0.5,
 }
 
 
@@ -73,7 +70,6 @@ def _to_iso_date_from_match(m: re.Match) -> Optional[str]:
         if not mon:
             return None
         if len(y) == 2:
-            # assume 20xx for 2-digit years (good enough for RERA timelines)
             y = "20" + y
         return f"{y}-{mon}-{d.zfill(2)}"
 
@@ -95,52 +91,49 @@ def _best_keyword_score(text: str) -> Tuple[float, list[str]]:
         if k in t:
             score = max(score, w)
             tags.append(k)
-    # de-dupe tags but keep stable order-ish
     tags = list(dict.fromkeys(tags))
     return score, tags
 
 
-def _extract_line_windows(text: str) -> List[str]:
-    # Keep RERA table-like rows intact (many are pipe-separated)
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    return lines
+def _context_window(text: str, start: int, end: int, *, window: int = 320) -> str:
+    a = max(0, start - window)
+    b = min(len(text), end + window)
+    snippet = text[a:b].strip()
+
+    # Collapse whitespace but keep verbatim characters (no paraphrase)
+    # NOTE: we must later validate this exact snippet exists in text.
+    snippet = " ".join(snippet.split())
+    if len(snippet) > 520:
+        snippet = snippet[:520].rstrip() + "…"
+    return snippet
 
 
 def _find_events_in_text(text: str) -> List[Tuple[str, str, float, list[str]]]:
     """
     Returns list of (iso_date, snippet, confidence, tags)
-    Snippet is a verbatim line/window containing the date.
+    Snippet is a verbatim context window around the date match (validated later).
     """
-    lines = _extract_line_windows(text)
     results: List[Tuple[str, str, float, list[str]]] = []
 
-    for ln in lines:
-        for pat in DATE_PATTERNS:
-            m = pat.search(ln)
-            if not m:
-                continue
+    for pat in DATE_PATTERNS:
+        for m in pat.finditer(text):
             iso = _to_iso_date_from_match(m)
             if not iso:
                 continue
+            snippet = _context_window(text, m.start(), m.end())
+            kw_score, tags = _best_keyword_score(snippet)
 
-            kw_score, tags = _best_keyword_score(ln)
             conf = 0.45 + 0.5 * kw_score  # 0.45..0.95
             conf = max(0.35, min(0.95, conf))
-
-            # Keep snippet bounded but verbatim
-            snippet = ln
-            if len(snippet) > 420:
-                snippet = snippet[:420].rstrip() + "…"
-
             results.append((iso, snippet, conf, tags))
+
     return results
 
 
 def _claim_from_snippet(snippet: str) -> str:
-    # Light cleaning, no new facts beyond snippet
     s = " ".join(snippet.replace("|", " ").split())
-    if len(s) > 220:
-        s = s[:220].rstrip() + "…"
+    if len(s) > 240:
+        s = s[:240].rstrip() + "…"
     return s
 
 
@@ -159,36 +152,39 @@ def extract_events_from_evidence(
     evidence_path: Path,
     *,
     min_confidence: float = 0.55,
+    max_events_per_doc: int = 20,
 ) -> Tuple[List[TimelineEvent], List[TimelineEvent]]:
-    """
-    Returns (raw_events, deduped_events)
-    """
     ev = load_evidence(evidence_path)
-
     raw: List[TimelineEvent] = []
 
     for e in ev:
         if (e.get("textChars") or 0) <= 0:
-            continue  # skip empty / needs OCR docs for now
+            continue
         text = load_text(e["textPath"])
         if not text.strip():
             continue
 
-        # Strict validation later uses this exact text
         found = _find_events_in_text(text)
 
+        # Keep best events per doc
+        found = sorted(found, key=lambda x: (-x[2], x[0]))[:max_events_per_doc]
+
         for iso, snippet, conf, tags in found:
-            # Validate snippet exists in text (verbatim safety)
-            if snippet.replace("…", "") not in text:
-                # If truncated with ellipsis, validate prefix exists
-                prefix = snippet.replace("…", "")
-                if prefix and prefix not in text:
+            if conf < min_confidence:
+                continue
+
+            # Validate snippet exists in text.
+            # If snippet ends with ellipsis, validate prefix exists.
+            if snippet.endswith("…"):
+                prefix = snippet[:-1].strip()
+                if prefix and prefix not in " ".join(text.split()):
+                    continue
+            else:
+                # We normalized whitespace in snippet, so validate on normalized text too.
+                if snippet not in " ".join(text.split()):
                     continue
 
             claim = _claim_from_snippet(snippet)
-
-            if conf < min_confidence:
-                continue
 
             raw.append(
                 TimelineEvent(
@@ -207,18 +203,18 @@ def extract_events_from_evidence(
                 )
             )
 
-    # Dedup: date + normalized snippet
+    # Better dedupe: date + normalized claim (first ~160 chars)
     seen = set()
     deduped: List[TimelineEvent] = []
     for item in sorted(raw, key=lambda x: (x.date, -x.confidence)):
-        key = (item.date, _normalize(item.evidence.snippet))
+        core = _normalize(item.claim)[:160]
+        key = (item.date, core)
         if key in seen:
             continue
         seen.add(key)
         deduped.append(item)
 
-    # Sort timeline ascending
-    deduped = sorted(deduped, key=lambda x: x.date)
+    deduped = sorted(deduped, key=lambda x: (x.date, -x.confidence))
     return raw, deduped
 
 
@@ -248,5 +244,4 @@ def store_events(
         ),
         encoding="utf-8",
     )
-
     return raw_path, deduped_path, timeline_path
