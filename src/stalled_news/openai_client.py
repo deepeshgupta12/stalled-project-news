@@ -67,3 +67,57 @@ def chat_completion_json(
         return json.loads(content)
     except Exception as e:
         raise RuntimeError(f"Model did not return valid JSON. Error={e}. Content={content[:500]}") from e
+
+
+# ------------------------------------------------------------
+# Backward-compatible JSON chat helper
+# Used by news_generator.py (expects openai_chat_json)
+# ------------------------------------------------------------
+import os
+import json
+from typing import Any, Dict, List, Optional
+
+def openai_chat_json(
+    *,
+    system: str,
+    user: str,
+    model: Optional[str] = None,
+    temperature: float = 0.2,
+    max_tokens: int = 1400,
+) -> Dict[str, Any]:
+    """
+    Calls OpenAI chat and returns a parsed JSON object.
+    This function intentionally keeps a strict contract: return dict or raise.
+
+    Requires:
+      - OPENAI_API_KEY in environment
+    Optional:
+      - OPENAI_MODEL in environment (fallback)
+    """
+    # Lazy import so serp commands don't fail due to OpenAI dependency
+    from openai import OpenAI
+
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("Missing OPENAI_API_KEY in .env")
+
+    m = model or os.getenv("OPENAI_MODEL", "").strip() or "gpt-4.1-mini"
+
+    client = OpenAI(api_key=api_key)
+
+    resp = client.chat.completions.create(
+        model=m,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        response_format={"type": "json_object"},
+    )
+
+    content = resp.choices[0].message.content or ""
+    try:
+        return json.loads(content)
+    except Exception as e:
+        raise RuntimeError(f"OpenAI returned non-JSON. First 300 chars: {content[:300]}") from e
