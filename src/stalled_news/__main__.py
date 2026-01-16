@@ -4,7 +4,7 @@ import argparse
 
 from .commands import cmd_ping, cmd_check_url
 from .models import ProjectInput
-from .serp_pipeline import run_serp_search, store_serp_run
+from .serp_pipeline import run_serp_search_with_debug, store_serp_run_with_debug
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -16,7 +16,7 @@ def build_parser() -> argparse.ArgumentParser:
     c = sub.add_parser("check-url", help="Check if a URL is allowed by whitelist")
     c.add_argument("--url", required=True)
 
-    s = sub.add_parser("serp-run", help="Run SerpAPI search + whitelist filter + store results")
+    s = sub.add_parser("serp-run", help="Run SerpAPI search + whitelist filter + store results (+debug files)")
     s.add_argument("--project_name", required=True)
     s.add_argument("--city", required=True)
     s.add_argument("--rera_id", required=False, default=None)
@@ -34,8 +34,8 @@ def main() -> None:
         cmd_check_url(args.url)
     elif args.command == "serp-run":
         project = ProjectInput(project_name=args.project_name, city=args.city, rera_id=args.rera_id)
-        run = run_serp_search(project)
-        out_path = store_serp_run(run)
+        run, all_debug, domain_counts = run_serp_search_with_debug(project)
+        out_path = store_serp_run_with_debug(run, all_debug, domain_counts)
         print(f"stored: {out_path}")
         print(f"whitelisted_results: {run.results_whitelisted}")
     else:

@@ -42,6 +42,7 @@ domains:
   # --- Govt / regulator / statutory (base domains) ---
   - gov.in
   - nic.in
+  - haryanarera.gov.in
 
   # --- Courts / legal information surfaces (India) ---
   - indiankanoon.org

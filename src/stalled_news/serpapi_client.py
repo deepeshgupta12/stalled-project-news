@@ -10,7 +10,6 @@ from .config import repo_root
 
 
 def _ensure_env_loaded() -> None:
-    # Always load repo-root .env for local determinism
     load_dotenv(repo_root() / ".env", override=True)
 
 
@@ -28,7 +27,7 @@ def fetch_serp_organic_results(
     engine: str = "google",
     gl: str = "in",
     hl: str = "en",
-    num: int = 10,
+    num: int = 20,
 ) -> List[Dict[str, Any]]:
     """
     Returns the raw 'organic_results' list from SerpAPI response.
