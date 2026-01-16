@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from .fetcher import fetch_url, stable_id_for_url
 from .extractors import extract_from_html, extract_from_pdf
@@ -20,7 +20,6 @@ def load_serp_run(path: Path) -> SerpRun:
 
 
 def make_run_dir_from_serp_results(serp_results_path: Path) -> Path:
-    # serp_results.json is stored in <artifacts>/<project>/<run_id>/serp_results.json
     return serp_results_path.parent
 
 
@@ -35,7 +34,6 @@ def store_text(path: Path, text: str) -> None:
 
 
 def build_snippets(text: str, max_snippets: int = 5, snippet_len: int = 280) -> List[str]:
-    # Simple deterministic snippetting (we'll do smarter evidence spans later)
     t = " ".join(text.split())
     if not t:
         return []
@@ -87,6 +85,8 @@ def fetch_and_extract_from_serp(serp_results_path: Path) -> Path:
                 "contentType": ct,
                 "title": extracted.title,
                 "publishedDate": extracted.published_date,
+                "needsOcr": bool(getattr(extracted, "needs_ocr", False)),
+                "textChars": len(extracted.text or ""),
                 "textPath": str(text_path),
                 "rawPath": str(raw_path),
                 "sourceQuery": item.source_query,
