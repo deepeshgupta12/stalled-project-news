@@ -6,6 +6,7 @@ from pathlib import Path
 from .commands import cmd_ping, cmd_check_url
 from .models import ProjectInput
 from .serp_pipeline import run_serp_search_with_debug, store_serp_run_with_debug
+from .serp_wide_pipeline import run_serp_wide
 from .evidence_pipeline import fetch_and_extract_from_serp
 from .event_extractor import extract_events_from_evidence, store_events
 from .news_generator import build_news_with_openai
@@ -24,6 +25,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--project_name", required=True)
     s.add_argument("--city", required=True)
     s.add_argument("--rera_id", required=False, default=None)
+
+    sw = sub.add_parser("serp-run-wide", help="Wider SERP sweep (adds news/general queries) + whitelist filter")
+    sw.add_argument("--project_name", required=True)
+    sw.add_argument("--city", required=True)
+    sw.add_argument("--rera_id", required=False, default=None)
 
     f = sub.add_parser("fetch-extract", help="Fetch + extract content for a stored serp_results.json")
     f.add_argument("--serp_results", required=True, help="Path to serp_results.json from artifacts")
@@ -60,6 +66,24 @@ def main() -> None:
         out_path = store_serp_run_with_debug(run, all_debug, domain_counts, raw_debug)
         print(f"stored: {out_path}")
         print(f"whitelisted_results: {run.results_whitelisted}")
+        return
+
+    if args.command == "serp-run-wide":
+        project = ProjectInput(project_name=args.project_name, city=args.city, rera_id=args.rera_id)
+        wide = run_serp_wide(project)
+        # Store in the same serp_results.json shape expected by fetch-extract
+        out_dir = Path("artifacts") / f"{project.project_name.lower().replace(' ','-')}-{project.city.lower().replace(' ','-')}" + (f"-{project.rera_id.lower().replace('/','-')}" if project.rera_id else "")
+        out_dir = Path("artifacts") / out_dir.name
+        run_id = __import__("datetime").datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+        target = out_dir / run_id
+        target.mkdir(parents=True, exist_ok=True)
+
+        (target / "serp_results_all.json").write_text(__import__("json").dumps(wide.all_results, indent=2, ensure_ascii=False), encoding="utf-8")
+        (target / "serp_domains_summary.json").write_text(__import__("json").dumps(wide.domain_counts, indent=2, ensure_ascii=False), encoding="utf-8")
+        (target / "serp_results.json").write_text(__import__("json").dumps(wide.whitelisted, indent=2, ensure_ascii=False), encoding="utf-8")
+
+        print(f"stored: {target / 'serp_results.json'}")
+        print(f"whitelisted_results: {len(wide.whitelisted)}")
         return
 
     if args.command == "fetch-extract":
