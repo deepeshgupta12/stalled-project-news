@@ -1,0 +1,67 @@
+# Strict whitelist of allowed evidence sources (domains only, no paths)
+# IMPORTANT: Keep domains ONLY. The pipeline will reject everything else.
+
+domains:
+  # --- Square Yards + major real estate platforms (signals; medium trust unless official docs referenced) ---
+  - squareyards.com
+  - housing.com
+  - magicbricks.com
+  - nobroker.in
+  - 99acres.com
+  - makaan.com
+  - commonfloor.com
+  - proptiger.com
+  - propstory.com
+  - realty.economictimes.indiatimes.com
+
+  # --- Tier-1 Indian news & business publishers ---
+  - timesofindia.indiatimes.com
+  - economictimes.indiatimes.com
+  - livemint.com
+  - business-standard.com
+  - thehindu.com
+  - hindustantimes.com
+  - indianexpress.com
+  - theprint.in
+  - scroll.in
+  - ndtv.com
+  - moneycontrol.com
+  - bloombergquint.com
+  - financialexpress.com
+  - firstpost.com
+  - india.com
+  - indiaToday.in
+  - aajtak.in
+
+  # --- Real estate / infra focused publishers (India) ---
+  - constructionworld.in
+  - realtynmore.com
+  - housingfinance.com
+  - infrastructuretoday.co.in
+  - smartcitiesindia.com
+
+  # --- Govt / regulator / statutory domains (India) ---
+  # NOTE: RERA portals vary state-wise. Add your exact state RERA domain(s) here.
+  - gov.in
+  - nic.in
+
+  # --- Courts / legal information surfaces (India) ---
+  - indiankanoon.org
+
+  # --- Global / additional business sources (optional, keep only if you want them) ---
+  - reuters.com
+  - bloomberg.com
+
+# Optional: domain trust ranking (higher = more trusted).
+# We will refine this once you share your final whitelist (esp. the exact RERA portal domain).
+trust_rank:
+  gov.in: 100
+  nic.in: 95
+  reuters.com: 90
+  bloomberg.com: 90
+  thehindu.com: 85
+  livemint.com: 85
+  business-standard.com: 85
+  economictimes.indiatimes.com: 80
+  timesofindia.indiatimes.com: 75
+  indiankanoon.org: 70

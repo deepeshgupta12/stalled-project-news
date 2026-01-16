@@ -1,0 +1,12 @@
+app:
+  name: stalled-project-news
+  env: local
+
+search:
+  serpapi_engine: google
+  max_results: 20
+  gl: in
+  hl: en
+
+artifacts:
+  base_dir: artifacts
