@@ -10,7 +10,6 @@ from dotenv import load_dotenv
 
 
 def repo_root() -> Path:
-    # Assumes this file lives at: repo/src/stalled_news/config.py
     return Path(__file__).resolve().parents[2]
 
 
@@ -34,7 +33,8 @@ def load_config(
     settings_path: Optional[Path] = None,
     whitelist_path: Optional[Path] = None,
 ) -> AppConfig:
-    load_dotenv(repo_root() / ".env")
+    # Force load repo-root .env (and override any shell vars for local dev determinism)
+    load_dotenv(repo_root() / ".env", override=True)
 
     settings_path = settings_path or (repo_root() / "configs" / "settings.yaml")
     whitelist_path = whitelist_path or (repo_root() / "configs" / "whitelist.yaml")
