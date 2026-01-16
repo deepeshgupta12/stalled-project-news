@@ -34,8 +34,8 @@ def main() -> None:
         cmd_check_url(args.url)
     elif args.command == "serp-run":
         project = ProjectInput(project_name=args.project_name, city=args.city, rera_id=args.rera_id)
-        run, all_debug, domain_counts = run_serp_search_with_debug(project)
-        out_path = store_serp_run_with_debug(run, all_debug, domain_counts)
+        run, all_debug, domain_counts, raw_debug = run_serp_search_with_debug(project)
+        out_path = store_serp_run_with_debug(run, all_debug, domain_counts, raw_debug)
         print(f"stored: {out_path}")
         print(f"whitelisted_results: {run.results_whitelisted}")
     else:

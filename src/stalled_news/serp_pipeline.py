@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Tuple
 from .config import repo_root, load_yaml
 from .models import ProjectInput, SerpFetchMeta, SerpResult, SerpRun
 from .query_pack import build_query_pack
-from .serpapi_client import fetch_serp_organic_results
+from .serpapi_client import fetch_serp_response
 from .whitelist import WhitelistPolicy, is_url_allowed, host_from_url
 
 
@@ -33,7 +33,6 @@ def artifacts_dir_for_project(project: ProjectInput) -> Path:
     rid = (project.rera_id or "").strip()
     key = f"{project.project_name}-{project.city}" + (f"-{rid}" if rid else "")
     project_slug = _slugify(key)
-
     return (root / str(base) / project_slug)
 
 
@@ -45,12 +44,13 @@ def load_whitelist_policy() -> WhitelistPolicy:
     return WhitelistPolicy.from_config(domains, sub_allowed)
 
 
-def run_serp_search_with_debug(project: ProjectInput) -> Tuple[SerpRun, List[Dict[str, Any]], Dict[str, int]]:
+def run_serp_search_with_debug(project: ProjectInput) -> Tuple[SerpRun, List[Dict[str, Any]], Dict[str, int], List[Dict[str, Any]]]:
     """
     Returns:
       - SerpRun (whitelist-filtered results)
       - all_results_debug (all organic results with allowed flag + domain)
       - domain_counts (domain -> count across all organic results)
+      - raw_responses (one entry per query, with minimal raw debug info)
     """
     root = repo_root()
     settings = load_yaml(root / "configs" / "settings.yaml")
@@ -67,11 +67,28 @@ def run_serp_search_with_debug(project: ProjectInput) -> Tuple[SerpRun, List[Dic
     collected_filtered: List[SerpResult] = []
     all_debug: List[Dict[str, Any]] = []
     domain_counter: Counter[str] = Counter()
+    raw_debug: List[Dict[str, Any]] = []
 
     per_query_num = min(max_results, 20)
 
     for q in queries:
-        organic = fetch_serp_organic_results(q, engine=engine, gl=gl, hl=hl, num=per_query_num)
+        data = fetch_serp_response(q, engine=engine, gl=gl, hl=hl, num=per_query_num)
+
+        # Store minimal raw info (so we can debug errors/quota without saving huge payloads)
+        raw_debug.append(
+            {
+                "query": q,
+                "top_level_keys": sorted(list(data.keys())),
+                "error": data.get("error"),
+                "search_metadata": data.get("search_metadata"),
+                "search_information": data.get("search_information"),
+            }
+        )
+
+        organic = data.get("organic_results") or []
+        if not isinstance(organic, list):
+            organic = []
+
         for r in organic:
             link = (r.get("link") or "").strip()
             title = (r.get("title") or "").strip()
@@ -136,26 +153,28 @@ def run_serp_search_with_debug(project: ProjectInput) -> Tuple[SerpRun, List[Dic
     )
 
     domain_counts = dict(domain_counter.most_common())
-    return run, all_debug, domain_counts
+    return run, all_debug, domain_counts, raw_debug
 
 
-def store_serp_run_with_debug(run: SerpRun, all_debug: List[Dict[str, Any]], domain_counts: Dict[str, int]) -> Path:
+def store_serp_run_with_debug(run: SerpRun, all_debug: List[Dict[str, Any]], domain_counts: Dict[str, int], raw_debug: List[Dict[str, Any]]) -> Path:
     out_dir = artifacts_dir_for_project(run.project)
     run_id = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
     target_dir = out_dir / run_id
     target_dir.mkdir(parents=True, exist_ok=True)
 
-    # Whitelisted only (used by later steps)
     out_path = target_dir / "serp_results.json"
     out_path.write_text(run.model_dump_json(indent=2), encoding="utf-8")
 
-    # Debug only (NOT used as evidence unless whitelisted)
     (target_dir / "serp_results_all.json").write_text(
         __import__("json").dumps(all_debug, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
     (target_dir / "serp_domains_summary.json").write_text(
         __import__("json").dumps(domain_counts, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    (target_dir / "serp_raw_debug.json").write_text(
+        __import__("json").dumps(raw_debug, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
 
