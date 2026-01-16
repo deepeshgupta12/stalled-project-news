@@ -1,0 +1,78 @@
+# Strict whitelist of allowed evidence sources (domains only, no paths)
+
+domains:
+  # --- Square Yards + major real estate platforms ---
+  - squareyards.com
+  - housing.com
+  - magicbricks.com
+  - nobroker.in
+  - 99acres.com
+  - makaan.com
+  - commonfloor.com
+  - proptiger.com
+  - propstory.com
+  - realty.economictimes.indiatimes.com
+
+  # --- Tier-1 Indian news & business publishers ---
+  - timesofindia.indiatimes.com
+  - economictimes.indiatimes.com
+  - livemint.com
+  - business-standard.com
+  - thehindu.com
+  - hindustantimes.com
+  - indianexpress.com
+  - theprint.in
+  - scroll.in
+  - ndtv.com
+  - moneycontrol.com
+  - bloombergquint.com
+  - financialexpress.com
+  - firstpost.com
+  - india.com
+  - indiatoday.in
+  - aajtak.in
+
+  # --- Real estate / infra focused publishers (India) ---
+  - constructionworld.in
+  - realtynmore.com
+  - housingfinance.com
+  - infrastructuretoday.co.in
+  - smartcitiesindia.com
+
+  # --- Govt / regulator / statutory (base domains) ---
+  - gov.in
+  - nic.in
+  - haryanarera.gov.in
+
+  # --- Courts / legal information surfaces (India) ---
+  - indiankanoon.org
+
+  # --- Global (optional) ---
+  - reuters.com
+  - bloomberg.com
+
+# Allow subdomains ONLY for these parent domains.
+# Example: for gov.in we may accept https://maharera.maharashtra.gov.in (not under gov.in though),
+# but for "gov.in" itself we accept foo.gov.in when present.
+subdomain_allowed:
+  - gov.in
+  - nic.in
+
+trust_rank:
+  gov.in: 100
+  nic.in: 95
+  reuters.com: 90
+  bloomberg.com: 90
+  thehindu.com: 85
+  livemint.com: 85
+  business-standard.com: 85
+  economictimes.indiatimes.com: 80
+  timesofindia.indiatimes.com: 75
+  indiankanoon.org: 70
+
+# Added in Step 6A: broader news/court coverage
+- constructionweekonline.in
+
+# Added in Step 6A: broader news/court coverage
+
+# Added in Step 6A: broader news/court coverage
