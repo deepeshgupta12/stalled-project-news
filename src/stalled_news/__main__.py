@@ -9,7 +9,6 @@ from .serp_pipeline import run_serp_search_with_debug, store_serp_run_with_debug
 from .serp_wide_pipeline import run_serp_wide
 from .evidence_pipeline import fetch_and_extract_from_serp
 from .event_extractor import extract_events_from_evidence, store_events
-from .news_generator import build_news_with_openai
 
 
 def build_parser() -> argparse.ArgumentParser:
