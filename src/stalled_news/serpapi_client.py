@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 import os
 
 from dotenv import load_dotenv
@@ -16,10 +16,61 @@ def serpapi_key() -> str:
     return k
 
 
+# ---------------------------
+# Backward compatibility layer
+# ---------------------------
+def fetch_serp_response(
+    params_or_query: Union[Dict[str, Any], str],
+    *,
+    engine: str = "google",
+    gl: str = "in",
+    hl: str = "en",
+    num: int = 10,
+) -> Dict[str, Any]:
+    """
+    Legacy compatibility: older code imports fetch_serp_response.
+
+    Supports BOTH call styles:
+      1) fetch_serp_response({"engine":"google","q":"...","api_key":"..."})
+      2) fetch_serp_response("query string", gl="in", hl="en", num=10)
+
+    Always ensures api_key is present (from .env if missing).
+    """
+    if isinstance(params_or_query, dict):
+        params = dict(params_or_query)
+        params.setdefault("engine", engine)
+        params.setdefault("gl", gl)
+        params.setdefault("hl", hl)
+        params.setdefault("num", num)
+        params.setdefault("api_key", serpapi_key())
+        return GoogleSearch(params).get_dict()
+
+    # string query path
+    q = str(params_or_query)
+    params = {
+        "engine": engine,
+        "q": q,
+        "gl": gl,
+        "hl": hl,
+        "num": num,
+        "api_key": serpapi_key(),
+    }
+    return GoogleSearch(params).get_dict()
+
+
+def fetch_serp_results_any(
+    query: str, *, engine: str = "google", gl: str = "in", hl: str = "en", num: int = 10
+) -> Dict[str, Any]:
+    """
+    New internal helper (explicit query -> raw SerpAPI dict).
+    """
+    return fetch_serp_response(query, engine=engine, gl=gl, hl=hl, num=num)
+
+
 def _collect_links_from_section(data: Dict[str, Any], section_key: str) -> List[Dict[str, Any]]:
     """
     Normalize SerpAPI sections into a common list of dicts with keys:
-      title, link, snippet, position, source, date
+      title, link, snippet, position, source, date, section
     """
     out: List[Dict[str, Any]] = []
     items = data.get(section_key) or []
@@ -34,7 +85,8 @@ def _collect_links_from_section(data: Dict[str, Any], section_key: str) -> List[
         snippet = it.get("snippet") or it.get("description")
         source = it.get("source") or it.get("publisher")
         date = it.get("date") or it.get("published_date") or it.get("timestamp")
-        # Some top_stories items contain nested stories under "stories"
+
+        # top_stories sometimes contains nested "stories"
         if not link and "stories" in it and isinstance(it["stories"], list):
             for j, st in enumerate(it["stories"]):
                 if not isinstance(st, dict):
@@ -68,18 +120,6 @@ def _collect_links_from_section(data: Dict[str, Any], section_key: str) -> List[
     return out
 
 
-def fetch_serp_results_any(query: str, *, engine: str = "google", gl: str = "in", hl: str = "en", num: int = 10) -> Dict[str, Any]:
-    params = {
-        "engine": engine,
-        "q": query,
-        "gl": gl,
-        "hl": hl,
-        "num": num,
-        "api_key": serpapi_key(),
-    }
-    return GoogleSearch(params).get_dict()
-
-
 def fetch_serp_links(query: str, *, engine: str = "google", gl: str = "in", hl: str = "en", num: int = 10) -> List[Dict[str, Any]]:
     """
     Returns a combined list of candidate links from multiple SERP sections:
@@ -91,7 +131,7 @@ def fetch_serp_links(query: str, *, engine: str = "google", gl: str = "in", hl: 
     data = fetch_serp_results_any(query, engine=engine, gl=gl, hl=hl, num=num)
 
     results: List[Dict[str, Any]] = []
-    # Organic
+
     organic = data.get("organic_results") or []
     if isinstance(organic, list):
         for r in organic:
@@ -110,14 +150,11 @@ def fetch_serp_links(query: str, *, engine: str = "google", gl: str = "in", hl: 
                 "section": "organic_results",
             })
 
-    # Top stories + news results (high impact for your use case)
     results.extend(_collect_links_from_section(data, "top_stories"))
     results.extend(_collect_links_from_section(data, "news_results"))
-
-    # Related questions sometimes links out; keep it optional but cheap
     results.extend(_collect_links_from_section(data, "related_questions"))
 
-    # De-dupe by link while preserving order
+    # De-dupe by link preserving order
     seen = set()
     out: List[Dict[str, Any]] = []
     for r in results:
@@ -131,11 +168,10 @@ def fetch_serp_links(query: str, *, engine: str = "google", gl: str = "in", hl: 
 
 def fetch_serp_organic_results(query: str, *, engine: str = "google", gl: str = "in", hl: str = "en", num: int = 10) -> List[Dict[str, Any]]:
     """
-    Backward-compatible function used by older pipeline code.
-    We now map 'fetch_serp_links' output to the older structure keys.
+    Backward-compatible function for older pipeline code: returns list of results.
+    Now it includes links from top_stories/news_results too, but mapped to older keys.
     """
     links = fetch_serp_links(query, engine=engine, gl=gl, hl=hl, num=num)
-    # Convert to old format keys expected elsewhere
     out: List[Dict[str, Any]] = []
     for i, r in enumerate(links):
         out.append({
@@ -146,6 +182,6 @@ def fetch_serp_organic_results(query: str, *, engine: str = "google", gl: str = 
             "section": r.get("section"),
             "source": r.get("source"),
             "date": r.get("date"),
-            "domain": None,  # computed later via host_from_url in whitelist module
+            "domain": None,  # later computed by whitelist module
         })
     return out
