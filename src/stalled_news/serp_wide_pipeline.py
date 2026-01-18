@@ -6,7 +6,7 @@ from typing import Any, Dict, List
 from .models import ProjectInput
 from .serpapi_client import fetch_serp_organic_results
 from .whitelist import is_url_allowed, host_from_url
-from .whitelist_helpers import load_whitelist_domains, bucket_domains
+from .whitelist_helpers import load_whitelist_domains, bucket_domains, load_whitelist_policy
 
 
 @dataclass
@@ -115,7 +115,7 @@ def run_serp_wide(
             }
             all_results.append(item)
 
-            if is_url_allowed(url, policy):
+            if is_url_allowed(url, load_whitelist_policy()):
                 whitelisted.append(item)
 
     return WideSerpRun(queries=queries, all_results=all_results, whitelisted=whitelisted, domain_counts=domain_counts)
