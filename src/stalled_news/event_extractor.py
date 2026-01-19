@@ -28,14 +28,16 @@ class TimelineEvent:
 
 
 DATE_PATTERNS = [
-    # dd.mm.yyyy or dd-mm-yyyy or dd/mm/yyyy
     re.compile(r"\b([0-3]?\d)[./-]([01]?\d)[./-]((?:19|20)\d{2})\b"),
-    # yyyy-mm-dd
     re.compile(r"\b((?:19|20)\d{2})-([01]\d)-([0-3]\d)\b"),
-    # Month dd, yyyy
-    re.compile(r"\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+([0-3]?\d)(?:st|nd|rd|th)?,\s+((?:19|20)\d{2})\b", re.I),
-    # dd Month yyyy
-    re.compile(r"\b([0-3]?\d)\s+(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+((?:19|20)\d{2})\b", re.I),
+    re.compile(
+        r"\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+([0-3]?\d)(?:st|nd|rd|th)?,\s+((?:19|20)\d{2})\b",
+        re.I,
+    ),
+    re.compile(
+        r"\b([0-3]?\d)\s+(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+((?:19|20)\d{2})\b",
+        re.I,
+    ),
 ]
 
 KEYWORD_TAGS = {
@@ -98,16 +100,11 @@ def _confidence(snippet: str) -> float:
 
 
 def _claim_from_snippet(snippet: str) -> str:
-    # Try to produce a human-ish claim from snippet (bounded by evidence)
     s = re.sub(r"\s+", " ", snippet).strip()
     return s[:420] + ("…" if len(s) > 420 else "")
 
 
 def _find_events_in_text(text: str) -> List[Tuple[str, str, float, List[str]]]:
-    """
-    Returns list of (iso_date, snippet, confidence, tags)
-    Snippet must be present in normalized text (checked later).
-    """
     norm_text = " ".join(text.split())
     events: List[Tuple[str, str, float, List[str]]] = []
 
@@ -117,17 +114,13 @@ def _find_events_in_text(text: str) -> List[Tuple[str, str, float, List[str]]]:
             if not iso:
                 continue
 
-            # Context window around the date mention
             start = max(0, m.start() - 220)
             end = min(len(norm_text), m.end() + 220)
             window = norm_text[start:end].strip()
 
-            # Snippet: keep a compact window (try to cut at sentence boundaries)
             snippet = window
-            # crude sentence cut
             if "." in window:
                 parts = window.split(".")
-                # take up to 2 sentence chunks
                 snippet = ".".join(parts[:2]).strip()
                 if len(snippet) < 40 and len(parts) > 2:
                     snippet = ".".join(parts[:3]).strip()
@@ -150,19 +143,46 @@ def load_text(path_str: str) -> str:
     return p.read_text(encoding="utf-8", errors="replace")
 
 
-def load_evidence(evidence_path: Path) -> List[Dict[str, Any]]:
+def _build_relevance_checker(project: Dict[str, Any]):
+    pname = _normalize(project.get("project_name") or project.get("projectName") or project.get("name") or "")
+    city = _normalize(project.get("city") or "")
+    rera = _normalize(project.get("rera_id") or project.get("reraId") or "")
+
+    p_tokens = [t for t in re.split(r"[^a-z0-9]+", pname) if t and len(t) >= 3]
+    c_tokens = [t for t in re.split(r"[^a-z0-9]+", city) if t and len(t) >= 3]
+    rera_compact = re.sub(r"[^a-z0-9]+", "", rera)
+
+    def is_relevant(text: str) -> bool:
+        t = _normalize(text)
+        if not t:
+            return False
+        if rera_compact and rera_compact in re.sub(r"[^a-z0-9]+", "", t):
+            return True
+        if len(p_tokens) >= 2 and sum(1 for tok in p_tokens[:6] if tok in t) >= 2:
+            return True
+        if len(p_tokens) == 1 and p_tokens[0] in t:
+            return True
+        if p_tokens and c_tokens and (p_tokens[0] in t) and any(ct in t for ct in c_tokens[:3]):
+            return True
+        return False
+
+    return is_relevant
+
+
+def load_evidence_bundle(evidence_path: Path) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     """
-    Compatibility loader:
-    - Old format: a list[dict]
-    - New format (Step 6E wide): {"counts": {...}, "docs": [ {doc_id, url, final_url, domain, snippet, text_path}, ... ]}
-    Converts new format into the old per-doc dict shape used by the extractor.
+    Supports:
+      - old evidence: list[dict]
+      - wide evidence: {"project":..., "docs":[...]}
+    Returns: (project_dict, docs_list_as_oldshape)
     """
     data = json.loads(evidence_path.read_text(encoding="utf-8"))
 
     if isinstance(data, list):
-        return data
+        return ({}, data)
 
     if isinstance(data, dict) and isinstance(data.get("docs"), list):
+        project = data.get("project") or {}
         out: List[Dict[str, Any]] = []
         for d in data["docs"]:
             if not isinstance(d, dict):
@@ -174,7 +194,6 @@ def load_evidence(evidence_path: Path) -> List[Dict[str, Any]]:
             snippet = (d.get("snippet") or "").strip()
             text_path = (d.get("text_path") or d.get("textPath") or "").strip()
 
-            # Compute textChars safely (do not crash if missing)
             text_chars = 0
             try:
                 tp = Path(text_path) if text_path else None
@@ -195,9 +214,14 @@ def load_evidence(evidence_path: Path) -> List[Dict[str, Any]]:
                     "needsOcr": False,
                 }
             )
-        return out
+        return (project, out)
 
     raise ValueError(f"Unsupported evidence.json format at: {evidence_path}")
+
+
+def load_evidence(evidence_path: Path) -> List[Dict[str, Any]]:
+    project, docs = load_evidence_bundle(evidence_path)
+    return docs
 
 
 def extract_events_from_evidence(
@@ -206,7 +230,9 @@ def extract_events_from_evidence(
     min_confidence: float = 0.55,
     max_events_per_doc: int = 20,
 ) -> Tuple[List[TimelineEvent], List[TimelineEvent]]:
-    ev = load_evidence(evidence_path)
+    project, ev = load_evidence_bundle(evidence_path)
+    is_relevant = _build_relevance_checker(project or {})
+
     raw: List[TimelineEvent] = []
 
     for e in ev:
@@ -215,8 +241,23 @@ def extract_events_from_evidence(
         if (e.get("textChars") or 0) <= 0:
             continue
 
+        blob = " ".join([str(e.get("finalUrl") or ""), str(e.get("url") or ""), str(e.get("domain") or ""), str(e.get("snippet") or "")])
+        if not is_relevant(blob):
+            # try text head too
+            text_head = ""
+            try:
+                tp = Path(str(e.get("textPath") or ""))
+                if tp.exists():
+                    text_head = tp.read_text(encoding="utf-8", errors="replace")[:2000]
+            except Exception:
+                text_head = ""
+            if not is_relevant(text_head):
+                continue
+
         text = load_text(e.get("textPath", ""))
         if not text.strip():
+            continue
+        if not is_relevant(text[:4000]):
             continue
 
         found = _find_events_in_text(text)
@@ -226,8 +267,11 @@ def extract_events_from_evidence(
             if conf < min_confidence:
                 continue
 
-            # Validate snippet exists in normalized text
             if snippet not in " ".join(text.split()):
+                continue
+
+            # additional guard: event snippet should also be project-relevant
+            if not is_relevant(snippet):
                 continue
 
             raw.append(
@@ -247,7 +291,6 @@ def extract_events_from_evidence(
                 )
             )
 
-    # Dedupe: (date + normalized claim prefix)
     seen = set()
     deduped: List[TimelineEvent] = []
     for item in sorted(raw, key=lambda x: (x.date, -x.confidence)):
@@ -284,7 +327,24 @@ def store_timeline(events: List[TimelineEvent], out_path: Path) -> None:
     out_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
-def store_events(raw: List[TimelineEvent], deduped: List[TimelineEvent], run_dir: Path) -> Dict[str, str]:
+def store_events(evidence_path, raw, deduped):
+    """
+    Writes:
+      - events_raw.json
+      - events_deduped.json
+      - timeline.json
+
+    Accepts evidence_path as:
+      - str / Path to evidence.json
+      - OR a list/tuple containing that path
+    """
+    if isinstance(evidence_path, (list, tuple)):
+        if not evidence_path:
+            raise ValueError("store_events: evidence_path is an empty list/tuple")
+        evidence_path = evidence_path[0]
+
+    ep = Path(evidence_path)
+    run_dir = ep if ep.is_dir() else ep.parent
     run_dir.mkdir(parents=True, exist_ok=True)
 
     raw_path = run_dir / "events_raw.json"
@@ -295,8 +355,4 @@ def store_events(raw: List[TimelineEvent], deduped: List[TimelineEvent], run_dir
     store_timeline(deduped, dedup_path)
     store_timeline(deduped, timeline_path)
 
-    return {
-        "events_raw": str(raw_path),
-        "events_deduped": str(dedup_path),
-        "timeline": str(timeline_path),
-    }
+    return str(raw_path), str(dedup_path), str(timeline_path)
