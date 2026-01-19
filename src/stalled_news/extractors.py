@@ -1,104 +1,116 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Optional
+from bs4 import BeautifulSoup
+
+try:
+    import fitz  # PyMuPDF
+except Exception:  # pragma: no cover
+    fitz = None
 
 from .models import ExtractedDoc
+from .whitelist import host_from_url
 
 
-def _safe_decode(b: bytes) -> str:
+def _clean_text(s: str) -> str:
+    s = (s or "").replace("\u00a0", " ")
+    s = " ".join(s.split())
+    return s.strip()
+
+
+def extract_text_from_html(url: str, final_url: str, html_bytes: bytes, status_code: int, content_type: str) -> ExtractedDoc:
+    domain = host_from_url(final_url or url) or host_from_url(url) or ""
     try:
-        return b.decode("utf-8", errors="ignore")
-    except Exception:
-        return ""
-
-
-def extract_text_from_html(raw: bytes) -> ExtractedDoc:
-    """
-    HTML -> plain text.
-    Uses BeautifulSoup if available, else a very basic fallback.
-    """
-    html = _safe_decode(raw).strip()
-    if not html:
-        return ExtractedDoc(text="", text_chars=0, needs_ocr=False, content_type="text/html")
-
-    text = ""
-    title: Optional[str] = None
-
-    # Prefer bs4 if installed
-    try:
-        from bs4 import BeautifulSoup  # type: ignore
-
-        soup = BeautifulSoup(html, "html.parser")
-
-        # Title
-        t = soup.find("title")
-        if t and t.get_text(strip=True):
-            title = t.get_text(strip=True)[:300]
-
+        soup = BeautifulSoup(html_bytes or b"", "html.parser")
         # Remove script/style
         for tag in soup(["script", "style", "noscript"]):
             tag.decompose()
 
-        text = soup.get_text(" ", strip=True)
+        title = None
+        if soup.title and soup.title.string:
+            title = _clean_text(soup.title.string)
 
-    except Exception:
-        # Fallback: strip tags crudely
-        import re
+        text = _clean_text(soup.get_text(" "))
+        return ExtractedDoc(
+            url=url,
+            final_url=final_url or url,
+            domain=domain,
+            content_type=content_type or "text/html",
+            status_code=status_code,
+            title=title,
+            text=text,
+            text_chars=len(text),
+            needs_ocr=False,
+        )
+    except Exception as e:
+        return ExtractedDoc(
+            url=url,
+            final_url=final_url or url,
+            domain=domain,
+            content_type=content_type or "text/html",
+            status_code=status_code,
+            title=None,
+            text="",
+            text_chars=0,
+            needs_ocr=False,
+            error=f"html_extract_error: {type(e).__name__}: {e}",
+        )
 
-        text = re.sub(r"<[^>]+>", " ", html)
-        text = " ".join(text.split())
 
-    return ExtractedDoc(
-        title=title,
-        content_type="text/html",
-        text=text,
-        text_chars=len(text),
-        needs_ocr=False,
-    )
-
-
-def extract_text_from_pdf(raw: bytes) -> ExtractedDoc:
-    """
-    PDF -> text using PyMuPDF if available.
-    If extracted text is empty, mark needs_ocr=True.
-    """
-    text = ""
-    title: Optional[str] = None
+def extract_text_from_pdf(url: str, final_url: str, pdf_bytes: bytes, status_code: int, content_type: str) -> ExtractedDoc:
+    domain = host_from_url(final_url or url) or host_from_url(url) or ""
+    if fitz is None:
+        return ExtractedDoc(
+            url=url,
+            final_url=final_url or url,
+            domain=domain,
+            content_type=content_type or "application/pdf",
+            status_code=status_code,
+            title=None,
+            text="",
+            text_chars=0,
+            needs_ocr=True,
+            error="pymupdf_not_installed",
+        )
 
     try:
-        import fitz  # PyMuPDF  # type: ignore
-
-        doc = fitz.open(stream=raw, filetype="pdf")
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
         parts = []
         for page in doc:
-            parts.append(page.get_text("text"))
-        text = "\n".join([p.strip() for p in parts if p and p.strip()]).strip()
+            parts.append(page.get_text("text") or "")
+        text = _clean_text("\n".join(parts))
+        needs_ocr = len(text) == 0
+        return ExtractedDoc(
+            url=url,
+            final_url=final_url or url,
+            domain=domain,
+            content_type=content_type or "application/pdf",
+            status_code=status_code,
+            title=None,
+            text=text,
+            text_chars=len(text),
+            needs_ocr=needs_ocr,
+        )
+    except Exception as e:
+        return ExtractedDoc(
+            url=url,
+            final_url=final_url or url,
+            domain=domain,
+            content_type=content_type or "application/pdf",
+            status_code=status_code,
+            title=None,
+            text="",
+            text_chars=0,
+            needs_ocr=True,
+            error=f"pdf_extract_error: {type(e).__name__}: {e}",
+        )
 
-        # Try PDF metadata title if present
-        try:
-            md = doc.metadata or {}
-            if md.get("title"):
-                title = str(md.get("title"))[:300]
-        except Exception:
-            pass
 
-    except Exception:
-        text = ""
-
-    needs_ocr = len(text.strip()) == 0
-
-    return ExtractedDoc(
-        title=title,
-        content_type="application/pdf",
-        text=text,
-        text_chars=len(text),
-        needs_ocr=needs_ocr,
-    )
+# Backward-compatible aliases (in case older code calls these)
+def extract_from_html(url: str, final_url: str, html_bytes: bytes, status_code: int, content_type: str) -> ExtractedDoc:
+    return extract_text_from_html(url, final_url, html_bytes, status_code, content_type)
 
 
-# Backward-compatible helper (older code sometimes calls a single entry point)
-def extract_text(content_type: str, raw: bytes) -> ExtractedDoc:
-    ct = (content_type or "").lower()
-    if "pdf" in ct:
-        return extract_text_from_pdf(raw)
-    return extract_text_from_html(raw)
+def extract_from_pdf(url: str, final_url: str, pdf_bytes: bytes, status_code: int, content_type: str) -> ExtractedDoc:
+    return extract_text_from_pdf(url, final_url, pdf_bytes, status_code, content_type)

@@ -1,56 +1,60 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
-from datetime import datetime
-
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field
 
 
 class ProjectInput(BaseModel):
-    project_name: str = Field(min_length=2)
-    city: str = Field(min_length=2)
+    project_name: str
+    city: str
     rera_id: Optional[str] = None
 
 
+class SerpMeta(BaseModel):
+    provider: str = "serpapi"
+    run_id: Optional[str] = None
+    generated_at: Optional[str] = None
+    notes: Optional[str] = None
+
+
 class SerpResult(BaseModel):
-    title: str = Field(default="")
-    link: HttpUrl
-    snippet: str = Field(default="")
-    position: int = Field(default=0)
-    source_query: str = Field(default="")
+    title: str = ""
+    url: str
+    final_url: Optional[str] = None
+    domain: str = ""
+    snippet: Optional[str] = None
+    date: Optional[str] = None
+    source_query: Optional[str] = None
 
-
-class SerpFetchMeta(BaseModel):
-    engine: str = Field(default="serpapi")
-    max_results: int = Field(default=10)
-    gl: str = Field(default="in")
-    hl: str = Field(default="en")
-
-
-# Backward-compatible alias (some pipeline steps use SerpMeta name)
-class SerpMeta(SerpFetchMeta):
-    pass
+    # allow extra keys from serp providers without breaking
+    model_config = {"extra": "allow"}
 
 
 class SerpRun(BaseModel):
-    """
-    Canonical SERP run object (used by the original serp-run path).
-    For serp-run-wide, we may reconstruct a SerpRun from a list format.
-    """
+    # Wide mode + normal mode both normalize into this
     project: ProjectInput
-    meta: SerpFetchMeta
-    results_total: int
-    results_whitelisted: int
+    meta: SerpMeta = Field(default_factory=SerpMeta)
+    results_total: int = 0
+    results_whitelisted: int = 0
     results: List[SerpResult] = Field(default_factory=list)
+
+    model_config = {"extra": "allow"}
 
 
 class ExtractedDoc(BaseModel):
+    url: str
+    final_url: str
+    domain: str
+    content_type: str
+    status_code: int
+    text: str
     title: Optional[str] = None
-    content_type: Optional[str] = None
     published_date: Optional[str] = None
-    text: str = ""
-    text_chars: int = 0
     needs_ocr: bool = False
+    text_chars: int = 0
+    error: Optional[str] = None
+
+    model_config = {"extra": "allow"}
 
 
 class EvidenceDoc(BaseModel):
@@ -58,27 +62,17 @@ class EvidenceDoc(BaseModel):
     url: str
     final_url: str
     domain: str
-
-    fetched_at: str
-    status_code: Optional[int] = None
-    content_type: Optional[str] = None
-
+    content_type: str
+    status_code: int
     title: Optional[str] = None
     published_date: Optional[str] = None
 
-    raw_path: Optional[str] = None
     text_path: Optional[str] = None
+    source_path: Optional[str] = None
 
-    # From SERP
-    source_query: Optional[str] = None
-    serp_snippet: Optional[str] = None
+    snippet: Optional[str] = None
+    textChars: int = 0
+    needsOcr: bool = False
+    error: Optional[str] = None
 
-    # Extraction diagnostics
-    text_chars: int = 0
-    needs_ocr: bool = False
-
-    extra: Dict[str, Any] = Field(default_factory=dict)
-
-
-def utc_now_iso() -> str:
-    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    model_config = {"extra": "allow"}
