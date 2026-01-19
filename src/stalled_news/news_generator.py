@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import asdict
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Optional
@@ -16,241 +15,157 @@ def _load_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _norm(s: Any) -> str:
-    return re.sub(r"\s+", " ", str(s or "")).strip().lower()
+def _normalize(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "")).strip().lower()
 
 
-def _tokenize(s: str) -> List[str]:
-    s = _norm(s)
-    parts = [p for p in re.split(r"[^a-z0-9]+", s) if p]
-    return parts
+def _project_tokens(project_name: str) -> List[str]:
+    pn = _normalize(project_name)
+    toks = [t for t in re.split(r"[^a-z0-9]+", pn) if t]
+    return [t for t in toks if len(t) >= 3]
 
 
-def _build_project_matcher(project: ProjectInput):
-    pname = _norm(project.project_name)
-    city = _norm(project.city)
-    rera = _norm(project.rera_id or "")
+def _doc_relevance_ok(*, blob: str, project_name: str, city: str, rera_id: Optional[str]) -> bool:
+    b = _normalize(blob)
 
-    # tokens for loose matching
-    p_tokens = [t for t in _tokenize(pname) if len(t) >= 3]
-    c_tokens = [t for t in _tokenize(city) if len(t) >= 3]
-    rera_compact = re.sub(r"[^a-z0-9]+", "", rera)
-
-    def is_relevant(text: str) -> bool:
-        t = _norm(text)
-        if not t:
-            return False
-
-        # strongest signal: rera id (compact)
-        if rera_compact and rera_compact in re.sub(r"[^a-z0-9]+", "", t):
+    if rera_id:
+        rid = _normalize(rera_id)
+        rid2 = rid.replace("/", " ").replace("-", " ")
+        if rid in b or rid2 in b:
             return True
 
-        # project name: require at least 2 meaningful tokens if available
-        if len(p_tokens) >= 2 and sum(1 for tok in p_tokens[:6] if tok in t) >= 2:
-            return True
-        if len(p_tokens) == 1 and p_tokens[0] in t:
-            return True
+    pn = _normalize(project_name)
+    if pn and pn in b:
+        return True
 
-        # fallback: project token + city token
-        if p_tokens and c_tokens and (p_tokens[0] in t) and any(ct in t for ct in c_tokens[:3]):
-            return True
+    toks = _project_tokens(project_name)
+    hits = sum(1 for t in set(toks) if t in b)
+    c = _normalize(city)
+    if hits >= 2 and (not c or c in b):
+        return True
 
-        return False
-
-    return is_relevant
+    return False
 
 
-def _normalize_evidence(evidence_any: Any, project: ProjectInput) -> List[Dict[str, Any]]:
+def _normalize_evidence(evidence_any: Any, run_dir: Path) -> List[Dict[str, Any]]:
     """
-    Supports:
-      - old format: list[dict]
-      - new wide format: {"project":..., "meta":..., "counts":..., "docs":[...]}
-    Returns a list of dicts with consistent keys used by news_generator:
-      id, url, finalUrl, domain, snippets(list[str]), textChars(int), needsOcr(bool),
-      title(optional), publishedDate(optional)
+    evidence.json can be:
+      - list[dict] (old)
+      - dict with "docs" (new wide)
+    Returns list of dicts in this canonical shape:
+      { id, url, finalUrl, domain, snippet, textPath, textChars }
     """
-    is_relevant = _build_project_matcher(project)
+    if isinstance(evidence_any, list):
+        return evidence_any
 
-    # Unwrap wide
     if isinstance(evidence_any, dict) and isinstance(evidence_any.get("docs"), list):
-        docs = evidence_any.get("docs") or []
-    elif isinstance(evidence_any, list):
-        docs = evidence_any
-    else:
-        docs = []
+        out: List[Dict[str, Any]] = []
+        for d in evidence_any["docs"]:
+            if not isinstance(d, dict):
+                continue
+            doc_id = (d.get("doc_id") or d.get("id") or "").strip()
+            url = (d.get("url") or "").strip()
+            final_url = (d.get("final_url") or d.get("finalUrl") or url).strip()
+            domain = (d.get("domain") or "").strip()
+            snippet = (d.get("snippet") or "").strip()
+            text_path = (d.get("text_path") or d.get("textPath") or "").strip()
 
-    out: List[Dict[str, Any]] = []
-    for d in docs:
-        if not isinstance(d, dict):
-            continue
-
-        doc_id = (d.get("id") or d.get("doc_id") or d.get("docId") or "").strip()
-        url = (d.get("url") or "").strip()
-        final_url = (d.get("finalUrl") or d.get("final_url") or d.get("finalUrl") or "").strip() or url
-        domain = (d.get("domain") or "").strip()
-        snippet = (d.get("snippet") or "").strip()
-
-        # Some pipelines store text_path; some store textPath
-        text_path = (d.get("text_path") or d.get("textPath") or "").strip()
-
-        # Prefer a known domain if missing
-        if not domain:
-            domain = host_from_url(final_url or url) or ""
-
-        # Snippets: old format may have "snippets" list
-        snippets = d.get("snippets")
-        if isinstance(snippets, list):
-            snips = [str(x) for x in snippets if str(x).strip()]
-        else:
-            snips = [snippet] if snippet else []
-
-        # textChars: old format might have it; else try file size
-        text_chars = 0
-        if isinstance(d.get("textChars"), int):
-            text_chars = int(d.get("textChars") or 0)
-        elif text_path:
+            text_chars = 0
             try:
-                tp = Path(text_path)
-                if tp.exists():
-                    # approximate chars by file bytes; good enough for ranking
-                    text_chars = max(0, int(tp.stat().st_size))
+                tp = Path(text_path) if text_path else None
+                if tp and tp.exists():
+                    text_chars = len(tp.read_text(encoding="utf-8", errors="replace"))
             except Exception:
                 text_chars = 0
 
-        item = {
-            "id": doc_id or "",
-            "url": url,
-            "finalUrl": final_url,
-            "domain": domain,
-            "snippet": snippet,
-            "snippets": snips,
-            "textChars": text_chars,
-            "needsOcr": bool(d.get("needsOcr", False)),
-            "title": d.get("title"),
-            "publishedDate": d.get("publishedDate"),
-            "textPath": text_path,
-        }
+            out.append(
+                {
+                    "id": doc_id,
+                    "url": url,
+                    "finalUrl": final_url,
+                    "domain": domain,
+                    "snippet": snippet,
+                    "textPath": text_path,
+                    "textChars": text_chars,
+                }
+            )
+        return out
 
-        # Relevance filter (critical to stop random gov PDFs hijacking the pack)
-        blob = " ".join([final_url, url, domain, snippet] + snips)
-        if not is_relevant(blob):
-            # also try first ~2KB of extracted text if available (cheap)
-            if text_path:
-                try:
-                    tp = Path(text_path)
-                    if tp.exists():
-                        head = tp.read_text(encoding="utf-8", errors="replace")[:2000]
-                        if not is_relevant(head):
-                            continue
-                    else:
-                        continue
-                except Exception:
-                    continue
-            else:
-                continue
+    return []
 
-        out.append(item)
 
-    # de-dupe by id or url
-    seen = set()
-    deduped = []
-    for e in out:
-        k = e.get("id") or e.get("finalUrl") or e.get("url")
-        if not k or k in seen:
+def _normalize_events(events_any: Any) -> List[Dict[str, Any]]:
+    """
+    events_deduped.json comes from event_extractor.store_timeline()
+    shape: {date, claim, confidence, tags, source:{domain,url,final_url,doc_id,text_path,snippet}}
+    We normalize it to also have `evidence` key so older code paths work.
+    """
+    if not isinstance(events_any, list):
+        return []
+
+    out: List[Dict[str, Any]] = []
+    for ev in events_any:
+        if not isinstance(ev, dict):
             continue
-        seen.add(k)
-        deduped.append(e)
-    return deduped
-
-
-def _event_source(ev: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Supports:
-      - events produced by store_timeline(): key = "source"
-      - older format: key = "evidence"
-    Returns normalized dict with: doc_id, domain, url, final_url, snippet
-    """
-    if not isinstance(ev, dict):
-        return {}
-    s = ev.get("source")
-    if isinstance(s, dict):
-        return {
-            "doc_id": s.get("doc_id"),
-            "domain": s.get("domain"),
-            "url": s.get("url"),
-            "final_url": s.get("final_url"),
-            "snippet": s.get("snippet"),
+        src = ev.get("source") or {}
+        if not isinstance(src, dict):
+            src = {}
+        evidence = {
+            "domain": src.get("domain"),
+            "url": src.get("url"),
+            "final_url": src.get("final_url"),
+            "doc_id": src.get("doc_id"),
+            "text_path": src.get("text_path"),
+            "snippet": src.get("snippet"),
         }
-    e = ev.get("evidence")
-    if isinstance(e, dict):
-        return {
-            "doc_id": e.get("doc_id"),
-            "domain": e.get("domain"),
-            "url": e.get("url"),
-            "final_url": e.get("final_url") or e.get("finalUrl"),
-            "snippet": e.get("snippet"),
-        }
-    return {}
+        ev2 = dict(ev)
+        ev2["evidence"] = evidence
+        out.append(ev2)
+    return out
 
 
-def _pick_primary_source(evidence: List[Dict[str, Any]], events: List[Dict[str, Any]], project: ProjectInput) -> Dict[str, Any]:
+def _pick_primary_source(evidence: List[Dict[str, Any]], events: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     Pick a primary dated source:
-    - Prefer gov/nic domains that are relevant to the project
-    - Else pick earliest dated event source among relevant ones
+    - Prefer govt/nic domains if they have dates (official status)
+    - Else pick earliest dated event source
     """
-    is_relevant = _build_project_matcher(project)
-
     ev_by_id = {e.get("id"): e for e in evidence if isinstance(e, dict) and e.get("id")}
 
-    # Prefer govt/nic based on event source
     for ev in events:
-        src = _event_source(ev)
-        doc_id = src.get("doc_id")
-        dom = _norm(src.get("domain") or "")
-        url = src.get("final_url") or src.get("url") or ""
-        blob = " ".join([str(ev.get("claim") or ""), str(src.get("snippet") or ""), url, dom])
-        if not is_relevant(blob):
+        ed = ev.get("evidence") or {}
+        doc_id = ed.get("doc_id")
+        if not doc_id:
             continue
+        e = ev_by_id.get(doc_id)
+        if not e:
+            continue
+        dom = (e.get("domain") or host_from_url(e.get("finalUrl") or e.get("url") or "") or "").lower()
         if dom.endswith("gov.in") or dom.endswith("nic.in"):
-            if doc_id and doc_id in ev_by_id:
-                e = ev_by_id[doc_id]
-                dom2 = _norm(e.get("domain") or host_from_url(e.get("finalUrl") or e.get("url") or "") or "")
-                return {"date": ev.get("date"), "domain": dom2, "url": e.get("finalUrl") or e.get("url"), "ref": doc_id}
-            return {"date": ev.get("date"), "domain": dom, "url": url, "ref": doc_id}
+            return {
+                "date": ev.get("date"),
+                "domain": dom,
+                "url": e.get("finalUrl") or e.get("url"),
+                "ref": doc_id,
+            }
 
-    # fallback: first relevant event
-    for ev in events:
-        src = _event_source(ev)
-        doc_id = src.get("doc_id")
-        dom = _norm(src.get("domain") or "")
-        url = src.get("final_url") or src.get("url") or ""
-        blob = " ".join([str(ev.get("claim") or ""), str(src.get("snippet") or ""), url, dom])
-        if not is_relevant(blob):
-            continue
+    if events:
+        ev0 = events[0]
+        ed = ev0.get("evidence") or {}
+        doc_id = ed.get("doc_id")
         if doc_id and doc_id in ev_by_id:
             e = ev_by_id[doc_id]
-            dom2 = _norm(e.get("domain") or host_from_url(e.get("finalUrl") or e.get("url") or "") or "")
-            return {"date": ev.get("date"), "domain": dom2, "url": e.get("finalUrl") or e.get("url"), "ref": doc_id}
-        return {"date": ev.get("date"), "domain": dom, "url": url, "ref": doc_id}
+            dom = (e.get("domain") or host_from_url(e.get("finalUrl") or e.get("url") or "") or "")
+            return {"date": ev0.get("date"), "domain": dom, "url": e.get("finalUrl") or e.get("url"), "ref": doc_id}
 
     return {"date": None, "domain": None, "url": None, "ref": None}
 
 
-def _domain_diversity_pack(
-    evidence: List[Dict[str, Any]],
-    events: List[Dict[str, Any]],
-    project: ProjectInput,
-    max_domains: int = 6,
-) -> Dict[str, Any]:
-    """
-    Prepare a compact pack of material for the LLM:
-    - group evidence by domain
-    - include a few snippets per domain
-    - include timeline events (snippet-backed)
-    """
+def _domain_diversity_pack(evidence: List[Dict[str, Any]], events: List[Dict[str, Any]], max_domains: int = 6) -> Dict[str, Any]:
     domains: Dict[str, List[Dict[str, Any]]] = {}
     for e in evidence:
+        if not isinstance(e, dict):
+            continue
         dom = (e.get("domain") or "").strip().lower()
         if not dom:
             dom = host_from_url(e.get("finalUrl") or e.get("url") or "") or "unknown"
@@ -259,62 +174,49 @@ def _domain_diversity_pack(
     def dom_rank(d: str) -> int:
         if d.endswith("gov.in") or d.endswith("nic.in"):
             return 0
-        if any(x in d for x in [
-            "timesofindia", "indiatimes", "economictimes", "livemint", "thehindu",
-            "indianexpress", "hindustantimes", "moneycontrol", "ndtv", "indiatoday",
-            "business-standard", "financialexpress"
-        ]):
+        if any(x in d for x in ["timesofindia", "indiatimes", "economictimes", "livemint", "thehindu", "indianexpress", "hindustantimes", "moneycontrol", "ndtv", "indiatoday", "business-standard", "financialexpress"]):
             return 1
         return 2
 
-    # sort by rank then by best text size, then by count
-    dom_list = sorted(
-        domains.keys(),
-        key=lambda d: (
-            dom_rank(d),
-            -max([it.get("textChars", 0) for it in domains[d]] or [0]),
-            -len(domains[d]),
-            d,
-        ),
-    )[:max_domains]
+    dom_list = sorted(domains.keys(), key=lambda d: (dom_rank(d), -len(domains[d]), d))[:max_domains]
 
     ev_pack: List[Dict[str, Any]] = []
     for d in dom_list:
         items = domains[d]
         items_sorted = sorted(items, key=lambda x: x.get("textChars", 0), reverse=True)[:3]
-        ev_pack.append({
-            "domain": d,
-            "items": [
-                {
-                    "id": it.get("id"),
-                    "url": it.get("finalUrl") or it.get("url"),
-                    "title": it.get("title"),
-                    "publishedDate": it.get("publishedDate"),
-                    "snippets": (it.get("snippets") or [])[:4],
-                    "needsOcr": it.get("needsOcr", False),
-                    "textChars": it.get("textChars", 0),
-                }
-                for it in items_sorted
-            ]
-        })
+        ev_pack.append(
+            {
+                "domain": d,
+                "items": [
+                    {
+                        "id": it.get("id"),
+                        "url": it.get("finalUrl") or it.get("url"),
+                        "title": it.get("title"),
+                        "publishedDate": it.get("publishedDate"),
+                        "snippets": (it.get("snippets") or [])[:4],
+                        "needsOcr": it.get("needsOcr", False),
+                        "textChars": it.get("textChars", 0),
+                    }
+                    for it in items_sorted
+                ],
+            }
+        )
 
-    # “news coverage candidates”
     news_candidates: List[Dict[str, Any]] = []
     for e in evidence:
+        if not isinstance(e, dict):
+            continue
         dom = (e.get("domain") or "").lower()
-        if any(x in dom for x in [
-            "indiatimes", "timesofindia", "economictimes", "livemint", "thehindu",
-            "indianexpress", "hindustantimes", "moneycontrol", "ndtv", "indiatoday",
-            "business-standard", "financialexpress"
-        ]):
-            news_candidates.append({
-                "domain": dom,
-                "url": e.get("finalUrl") or e.get("url"),
-                "title": e.get("title"),
-                "publishedDate": e.get("publishedDate"),
-                "snippets": (e.get("snippets") or [])[:4],
-                "ref": e.get("id"),
-            })
+        if any(x in dom for x in ["indiatimes", "timesofindia", "economictimes", "livemint", "thehindu", "indianexpress", "hindustantimes", "moneycontrol", "ndtv", "indiatoday", "business-standard", "financialexpress"]):
+            news_candidates.append(
+                {
+                    "domain": dom,
+                    "url": e.get("finalUrl") or e.get("url"),
+                    "title": e.get("title"),
+                    "publishedDate": e.get("publishedDate"),
+                    "snippets": (e.get("snippets") or [])[:4],
+                }
+            )
 
     seen = set()
     news_out = []
@@ -326,24 +228,21 @@ def _domain_diversity_pack(
         news_out.append(n)
     news_out = news_out[:8]
 
-    # Timeline from extracted events: normalize source/evidence
     timeline = []
     for ev in events[:30]:
-        src = _event_source(ev)
-        timeline.append({
-            "date": ev.get("date"),
-            "claim": ev.get("claim"),
-            "ref": src.get("doc_id"),
-            "domain": src.get("domain"),
-            "url": src.get("final_url") or src.get("url"),
-            "snippet": src.get("snippet"),
-        })
+        ed = ev.get("evidence") or {}
+        timeline.append(
+            {
+                "date": ev.get("date"),
+                "claim": ev.get("claim"),
+                "ref": ed.get("doc_id"),
+                "domain": ed.get("domain"),
+                "url": ed.get("final_url") or ed.get("url"),
+                "snippet": ed.get("snippet"),
+            }
+        )
 
-    return {
-        "domains": ev_pack,
-        "timeline": timeline,
-        "newsCoverageCandidates": news_out,
-    }
+    return {"domains": ev_pack, "timeline": timeline, "newsCoverageCandidates": news_out}
 
 
 def build_news_with_openai(
@@ -355,28 +254,44 @@ def build_news_with_openai(
     run_dir = run_dir.resolve()
     evidence_path = run_dir / "evidence.json"
     evidence_any = _load_json(evidence_path) if evidence_path.exists() else []
-    events = _load_json(events_deduped_path)
+    evidence_docs = _normalize_evidence(evidence_any, run_dir)
 
-    if not isinstance(events, list):
-        raise ValueError(f"events file must be a list, got: {type(events)} at {events_deduped_path}")
+    events_any = _load_json(events_deduped_path)
+    events = _normalize_events(events_any)
 
-    evidence = _normalize_evidence(evidence_any, project)
+    # --------- RELEVANCE FILTER EVIDENCE (prevents NIC noise) ----------
+    filtered_evidence: List[Dict[str, Any]] = []
+    for d in evidence_docs:
+        blob = f"{d.get('snippet') or ''}\n{d.get('url') or ''}\n{d.get('finalUrl') or ''}"
+        # try adding some text head if available (cheap)
+        tp = d.get("textPath")
+        if tp:
+            try:
+                t = Path(tp).read_text(encoding="utf-8", errors="replace")
+                blob += "\n" + t[:3000]
+            except Exception:
+                pass
 
-    primary = _pick_primary_source(evidence, events, project)
-    pack = _domain_diversity_pack(evidence, events, project)
+        if _doc_relevance_ok(blob=blob, project_name=project.project_name, city=project.city, rera_id=project.rera_id):
+            filtered_evidence.append(d)
+
+    # If filtering accidentally drops everything, fall back (but this should not happen with your RERA docs)
+    evidence_use = filtered_evidence or evidence_docs
+
+    primary = _pick_primary_source(evidence_use, events)
+    pack = _domain_diversity_pack(evidence_use, events)
 
     generated_at = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
     valid_until = (datetime.utcnow().replace(microsecond=0) + timedelta(days=7)).isoformat() + "Z"
 
-    # IMPORTANT: OpenAI json_object requires 'json' word in messages.
+    # IMPORTANT: include the word "json" to satisfy OpenAI response_format requirements
     system = (
         "You are generating a factual, evidence-bounded project update for a stalled/delayed real-estate project in India. "
         "Hard rule: you MUST NOT invent facts. Every factual claim must be supported by at least one provided snippet. "
-        "If evidence is insufficient, write 'Insufficient evidence' and do not guess. "
-        "Return ONLY valid JSON."
+        "Return strictly valid JSON only."
     )
 
-    user = {
+    user_obj = {
         "project": {"name": project.project_name, "city": project.city, "reraId": project.rera_id},
         "primarySourceHint": primary,
         "inputs": pack,
@@ -398,7 +313,7 @@ def build_news_with_openai(
             "Write like a human analyst: vary sentence length, avoid generic AI phrases, be specific where evidence exists.",
             "Do not overclaim: if only regulator records exist, say so and avoid dramatic language.",
             "Cater to BOTH buyers and investors in separate sections.",
-            "If multiple domains exist in inputs.domains, cite at least 2 distinct domains when possible.",
+            "If multiple domains exist, ensure the timeline/newsCoverage cites multiple domains (diversity) when possible.",
         ],
         "citationRules": [
             "Use only refs provided in inputs.timeline (ref/doc_id) or inputs.domains.items[].id",
@@ -406,9 +321,9 @@ def build_news_with_openai(
         ],
     }
 
-    news = openai_chat_json(system=system, user=json.dumps(user, ensure_ascii=False))
+    news = openai_chat_json(system=system, user=json.dumps(user_obj, ensure_ascii=False))
 
-    # Collect refs used in the model output
+    # Collect refs used
     used_refs = set()
 
     def _collect(obj: Any):
@@ -423,7 +338,7 @@ def build_news_with_openai(
 
     _collect(news)
 
-    ev_by_id = {e.get("id"): e for e in evidence if isinstance(e, dict) and e.get("id")}
+    ev_by_id = {e.get("id"): e for e in evidence_use if isinstance(e, dict) and e.get("id")}
     sources = []
     for ref in sorted(list(used_refs)):
         e = ev_by_id.get(ref)
@@ -437,17 +352,16 @@ def build_news_with_openai(
     news["generatedAt"] = generated_at
     news["validUntil"] = valid_until
 
-    # Save artifacts
     out_news_json = run_dir / "news.json"
     out_inputs_json = run_dir / "news_inputs.json"
     out_raw_json = run_dir / "news_llm_raw.json"
     out_html = run_dir / "news.html"
 
     out_news_json.write_text(json.dumps(news, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    out_inputs_json.write_text(json.dumps(user, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    out_inputs_json.write_text(json.dumps(user_obj, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     out_raw_json.write_text(json.dumps({"ok": True}, indent=2) + "\n", encoding="utf-8")
 
-    # HTML render (no backlinks)
+    # HTML render
     def esc(s: Any) -> str:
         x = "" if s is None else str(s)
         return x.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
