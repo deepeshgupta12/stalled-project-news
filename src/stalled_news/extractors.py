@@ -1,73 +1,65 @@
 from __future__ import annotations
 
-import re
-from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Optional
 
-import trafilatura
+from bs4 import BeautifulSoup
 
-# Optional PDF parsing
-try:
-    import fitz  # pymupdf
-except Exception:  # pragma: no cover
-    fitz = None
+from .models import ExtractedDoc
+from .fetcher import stable_id_for_url
 
 
-@dataclass(frozen=True)
-class ExtractedDoc:
-    text: str
-    needs_ocr: bool = False
-    text_chars: int = 0
-
-
-def extract_from_html(html: str, base_url: str) -> ExtractedDoc:
-    txt = trafilatura.extract(
-        html,
-        url=base_url,
-        include_comments=False,
-        include_tables=True,
-        no_fallback=False,
-    ) or ""
-    txt = txt.strip()
-    return ExtractedDoc(text=txt, needs_ocr=False, text_chars=len(txt))
-
-
-def _pdf_text_pymupdf(pdf_bytes: bytes) -> str:
-    if fitz is None:
-        return ""
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    parts = []
-    for page in doc:
-        parts.append(page.get_text("text") or "")
-    return "\n".join(parts).strip()
-
-
-def extract_from_pdf(pdf_bytes: bytes) -> ExtractedDoc:
-    txt = _pdf_text_pymupdf(pdf_bytes)
-    txt = (txt or "").strip()
-    needs_ocr = (len(txt) == 0)
-    return ExtractedDoc(text=txt, needs_ocr=needs_ocr, text_chars=len(txt))
-
-
-# ---- Backward-compatible names used by your evolving pipeline ----
-
-def extract_text_from_html(html: str, base_url: str) -> ExtractedDoc:
-    return extract_from_html(html, base_url)
-
-
-def extract_text_from_pdf(pdf_bytes: bytes) -> ExtractedDoc:
-    return extract_from_pdf(pdf_bytes)
-
-
-def extract_text_from_response(content_type: str, body: bytes, final_url: str) -> ExtractedDoc:
-    ct = (content_type or "").split(";")[0].strip().lower()
-
-    if "pdf" in ct or final_url.lower().endswith(".pdf"):
-        return extract_from_pdf(body)
-
-    # default HTML
+def _domain_from_url(url: str) -> str:
     try:
-        html = body.decode("utf-8", errors="ignore")
+        from urllib.parse import urlparse
+        return (urlparse(url).netloc or "").lower()
     except Exception:
-        html = ""
-    return extract_from_html(html, final_url)
+        return ""
+
+
+def extract_text_from_html(url: str, html: str, *, snippet: str = "", final_url: Optional[str] = None) -> ExtractedDoc:
+    soup = BeautifulSoup(html or "", "html.parser")
+
+    # Remove obvious noise
+    for tag in soup(["script", "style", "noscript"]):
+        tag.decompose()
+
+    text = soup.get_text("\n")
+    # Normalize whitespace a bit
+    lines = [ln.strip() for ln in text.splitlines()]
+    text = "\n".join([ln for ln in lines if ln])
+
+    doc_id = stable_id_for_url(final_url or url)
+    return ExtractedDoc(
+        doc_id=doc_id,
+        url=url,
+        final_url=final_url or url,
+        domain=_domain_from_url(final_url or url),
+        content_type="text/html",
+        text=text,
+        snippet=snippet or "",
+    )
+
+
+def extract_text_from_pdf_bytes(url: str, pdf_bytes: bytes, *, snippet: str = "", final_url: Optional[str] = None) -> ExtractedDoc:
+    # Best-effort PDF text extraction
+    text = ""
+    try:
+        import fitz  # pymupdf
+        with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
+            parts = []
+            for page in doc:
+                parts.append(page.get_text("text"))
+            text = "\n".join(parts).strip()
+    except Exception:
+        text = ""
+
+    doc_id = stable_id_for_url(final_url or url)
+    return ExtractedDoc(
+        doc_id=doc_id,
+        url=url,
+        final_url=final_url or url,
+        domain=_domain_from_url(final_url or url),
+        content_type="application/pdf",
+        text=text,
+        snippet=snippet or "",
+    )
