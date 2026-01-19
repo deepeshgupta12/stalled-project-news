@@ -1,121 +1,156 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+import re
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import List, Optional
 
-from .fetcher import fetch_url, stable_id_for_url
-from .extractors import extract_from_html, extract_from_pdf
-from .whitelist import host_from_url
-from .models import SerpResult, SerpRun
+from .fetcher import fetch_url
+from .extractors import extract_text_from_response
+from .models import ProjectInput, SerpFetchMeta, SerpResult, SerpRun
 
 
-def _now_iso() -> str:
-    return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+def _project_from_source_query(q: Optional[str]) -> ProjectInput:
+    """
+    Tries to infer project_name/city/rera_id from a wide query like:
+      "\"Zara Roma\" \"Gurgaon\" \"GGM/582/314/2022/57\""
+    Falls back to 'unknown' if not parsable.
+    """
+    q = q or ""
+    parts = re.findall(r'"([^"]+)"', q)
+    project_name = parts[0].strip() if len(parts) >= 1 else "unknown"
+    city = parts[1].strip() if len(parts) >= 2 else "unknown"
+    rera_id = parts[2].strip() if len(parts) >= 3 else None
+
+    # Pydantic constraint: min_length=2
+    if len(project_name) < 2:
+        project_name = "NA"
+    if len(city) < 2:
+        city = "NA"
+
+    return ProjectInput(project_name=project_name, city=city, rera_id=rera_id)
 
 
 def load_serp_run(path: Path) -> SerpRun:
-    import json
+    """
+    Supports BOTH formats:
+      A) Old format: full SerpRun JSON object (dict)
+      B) New wide format: JSON list of result objects
+    """
+    data = json.loads(path.read_text(encoding="utf-8"))
 
-    raw = json.loads(path.read_text(encoding="utf-8"))
+    # A) Already a SerpRun object
+    if isinstance(data, dict):
+        return SerpRun.model_validate(data)
 
-    # serp-run-wide writes a JSON list; serp-run writes {"results":[...]}
-    if isinstance(raw, list):
-        results = []
-        for item in raw:
-            # Map wide-item keys -> SearchResult
-            results.append(
-                SerpResult(
-                    source_query=item.get("source_query") or item.get("query") or "",
-                    link=item.get("link") or item.get("url") or "",
-                    title=item.get("title"),
-                    snippet=item.get("snippet"),
-                    position=item.get("position"),
-                    domain=item.get("domain"),
-                    date=item.get("date"),
-                )
-            )
-        return SerpRun(results=results)
+    # B) Wide format: list of results
+    if not isinstance(data, list):
+        raise ValueError(f"Unsupported SERP JSON format in {path}: expected dict or list, got {type(data)}")
 
-    # Normal case (object)
-    return SerpRun.model_validate(raw)
-
-
-def make_run_dir_from_serp_results(serp_results_path: Path) -> Path:
-    return serp_results_path.parent
-
-
-def store_bytes(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(data)
-
-
-def store_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
-
-
-def build_snippets(text: str, max_snippets: int = 5, snippet_len: int = 280) -> List[str]:
-    t = " ".join(text.split())
-    if not t:
-        return []
-    out = []
-    step = max(1, len(t) // max_snippets)
-    for i in range(0, min(len(t), step * max_snippets), step):
-        out.append(t[i : i + snippet_len])
-        if len(out) >= max_snippets:
+    first_q = None
+    for it in data:
+        if isinstance(it, dict) and it.get("source_query"):
+            first_q = it.get("source_query")
             break
-    return out
 
+    project = _project_from_source_query(first_q)
+    meta = SerpFetchMeta(engine="google", max_results=10, gl="in", hl="en")
 
-def fetch_and_extract_from_serp(serp_results_path: Path) -> Path:
-    run_dir = make_run_dir_from_serp_results(serp_results_path)
-    sources_dir = run_dir / "sources"
-    texts_dir = run_dir / "texts"
-    evidence_path = run_dir / "evidence.json"
+    results: List[SerpResult] = []
+    for it in data:
+        if not isinstance(it, dict):
+            continue
 
-    serp_run = load_serp_run(serp_results_path)
+        link = it.get("link") or it.get("url")
+        title = it.get("title") or it.get("name")
 
-    evidence: List[Dict[str, Any]] = []
-    for item in serp_run.results:
-        url = str(item.link)
-        doc_id = stable_id_for_url(url)
-        domain = host_from_url(url) or ""
+        # SerpResult requires title + link
+        if not link or not title:
+            continue
 
-        fetched_at = _now_iso()
-        fr = fetch_url(url)
-
-        ct = fr.content_type or ""
-        is_pdf = ("pdf" in ct) or fr.final_url.lower().endswith(".pdf")
-
-        raw_path = sources_dir / f"{doc_id}.pdf" if is_pdf else sources_dir / f"{doc_id}.html"
-        store_bytes(raw_path, fr.body)
-
-        extracted = extract_from_pdf(fr.body) if is_pdf else extract_from_html(fr.body, fr.final_url)
-
-        text_path = texts_dir / f"{doc_id}.txt"
-        store_text(text_path, extracted.text)
-
-        evidence.append(
-            {
-                "id": doc_id,
-                "url": url,
-                "finalUrl": fr.final_url,
-                "domain": domain,
-                "fetchedAt": fetched_at,
-                "statusCode": fr.status_code,
-                "contentType": ct,
-                "title": extracted.title,
-                "publishedDate": extracted.published_date,
-                "needsOcr": bool(getattr(extracted, "needs_ocr", False)),
-                "textChars": len(extracted.text or ""),
-                "textPath": str(text_path),
-                "rawPath": str(raw_path),
-                "sourceQuery": item.source_query,
-                "snippets": build_snippets(extracted.text),
-            }
+        results.append(
+            SerpResult(
+                title=str(title),
+                link=str(link),
+                snippet=it.get("snippet"),
+                position=it.get("position"),
+                source_query=str(it.get("source_query") or first_q or ""),
+            )
         )
 
-    evidence_path.write_text(json.dumps(evidence, indent=2, ensure_ascii=False), encoding="utf-8")
-    return evidence_path
+    return SerpRun(
+        project=project,
+        meta=meta,
+        results_total=len(results),
+        results_whitelisted=len(results),
+        results=results,
+    )
+
+
+def fetch_and_extract_from_serp(serp_results_path: str):
+    serp_results_path = Path(serp_results_path)
+    run_dir = serp_results_path.parent
+    sources_dir = run_dir / "sources"
+    texts_dir = run_dir / "texts"
+    sources_dir.mkdir(parents=True, exist_ok=True)
+    texts_dir.mkdir(parents=True, exist_ok=True)
+
+    serp_run = load_serp_run(serp_results_path)
+    results = serp_run.results
+
+    evidence = []
+    for r in results:
+        url = r.link
+        try:
+            resp = fetch_url(url)
+            text, meta = extract_text_from_response(resp, url=url)
+            doc_id = meta.get("id") or meta.get("hash") or "doc"
+
+            raw_ext = meta.get("ext") or ("pdf" if "pdf" in (meta.get("contentType") or "") else "html")
+            raw_path = sources_dir / f"{doc_id}.{raw_ext}"
+            txt_path = texts_dir / f"{doc_id}.txt"
+
+            raw_path.write_bytes(meta.get("rawBytes") or b"")
+            txt_path.write_text(text or "", encoding="utf-8")
+
+            meta_out = {
+                "id": doc_id,
+                "url": url,
+                "finalUrl": meta.get("finalUrl") or url,
+                "domain": meta.get("domain"),
+                "fetchedAt": meta.get("fetchedAt"),
+                "statusCode": meta.get("statusCode"),
+                "contentType": meta.get("contentType"),
+                "title": meta.get("title"),
+                "publishedDate": meta.get("publishedDate"),
+                "textPath": str(txt_path),
+                "rawPath": str(raw_path),
+                "sourceQuery": r.source_query,
+                "snippets": meta.get("snippets") or [],
+                "needsOcr": meta.get("needsOcr"),
+                "textChars": meta.get("textChars"),
+            }
+            evidence.append(meta_out)
+        except Exception as e:
+            evidence.append(
+                {
+                    "id": None,
+                    "url": url,
+                    "finalUrl": url,
+                    "domain": None,
+                    "fetchedAt": None,
+                    "statusCode": None,
+                    "contentType": None,
+                    "title": None,
+                    "publishedDate": None,
+                    "textPath": None,
+                    "rawPath": None,
+                    "sourceQuery": r.source_query,
+                    "snippets": [],
+                    "error": str(e),
+                }
+            )
+
+    out_path = run_dir / "evidence.json"
+    out_path.write_text(json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8")
+    return str(out_path)
