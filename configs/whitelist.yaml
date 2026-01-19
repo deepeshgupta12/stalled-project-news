@@ -1,5 +1,3 @@
-# Whitelisted domains for search-first stalled-project news pipeline
-# Auto-rebuilt to fix YAML structure issues
 domains:
   - squareyards.com
   - housing.com
@@ -10,6 +8,8 @@ domains:
   - commonfloor.com
   - proptiger.com
   - propstory.com
+
+  # News (keep what you want)
   - realty.economictimes.indiatimes.com
   - timesofindia.indiatimes.com
   - economictimes.indiatimes.com
@@ -22,21 +22,16 @@ domains:
   - scroll.in
   - ndtv.com
   - moneycontrol.com
-  - bloombergquint.com
   - financialexpress.com
   - firstpost.com
-  - india.com
   - indiatoday.in
-  - aajtak.in
-  - constructionworld.in
-  - realtynmore.com
-  - housingfinance.com
-  - infrastructuretoday.co.in
-  - smartcitiesindia.com
-  - gov.in
-  - nic.in
-  - haryanarera.gov.in
+
+  # Courts
   - indiankanoon.org
-  - reuters.com
-  - bloomberg.com
-  - constructionweekonline.in
+
+  # Regulators (EXPLICIT ONLY)
+  - haryanarera.gov.in
+
+subdomain_allowed:
+  # allow www.haryanarera.gov.in etc. BUT DO NOT add gov.in / nic.in here
+  - haryanarera.gov.in
