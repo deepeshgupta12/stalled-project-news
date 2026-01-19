@@ -71,8 +71,10 @@ def main() -> None:
         project = ProjectInput(project_name=args.project_name, city=args.city, rera_id=args.rera_id)
         wide = run_serp_wide(project)
         # Store in the same serp_results.json shape expected by fetch-extract
-        out_dir = Path("artifacts") / f"{project.project_name.lower().replace(' ','-')}-{project.city.lower().replace(' ','-')}" + (f"-{project.rera_id.lower().replace('/','-')}" if project.rera_id else "")
-        out_dir = Path("artifacts") / out_dir.name
+        slug = f"{project.project_name.lower().replace(' ','-')}-{project.city.lower().replace(' ','-')}"
+        if project.rera_id:
+            slug += f"-{project.rera_id.lower().replace('/','-')}"
+        out_dir = Path('artifacts') / slug
         run_id = __import__("datetime").datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
         target = out_dir / run_id
         target.mkdir(parents=True, exist_ok=True)
