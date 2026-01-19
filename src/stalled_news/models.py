@@ -1,86 +1,70 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
-from pydantic import BaseModel, Field
+
+from pydantic import BaseModel, Field, HttpUrl
 
 
 class ProjectInput(BaseModel):
-    project_name: str
-    city: str
+    project_name: str = Field(min_length=2)
+    city: str = Field(min_length=2)
     rera_id: Optional[str] = None
 
 
-class SerpMeta(BaseModel):
+class SerpFetchMeta(BaseModel):
     provider: str = "serpapi"
-    run_id: Optional[str] = None
-    generated_at: Optional[str] = None
-    notes: Optional[str] = None
+    fetched_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    note: Optional[str] = None
+
+
+# Backward-compatible alias used elsewhere in codebase
+SerpMeta = SerpFetchMeta
 
 
 class SerpResult(BaseModel):
-    title: str = ""
-    url: str
-    final_url: Optional[str] = None
-    domain: str = ""
+    title: str
+    link: HttpUrl
+    domain: str
     snippet: Optional[str] = None
     date: Optional[str] = None
     source_query: Optional[str] = None
 
-    # allow extra keys from serp providers without breaking
-    model_config = {"extra": "allow"}
-
 
 class SerpRun(BaseModel):
-    # Wide mode + normal mode both normalize into this
     project: ProjectInput
-    meta: SerpMeta = Field(default_factory=SerpMeta)
-    results_total: int = 0
-    results_whitelisted: int = 0
-    results: List[SerpResult] = Field(default_factory=list)
-
-    model_config = {"extra": "allow"}
+    meta: SerpFetchMeta
+    results: List[SerpResult]
+    results_total: int
+    results_whitelisted: int
 
 
+# Compatibility alias (some modules import this name)
+SerpFetchMeta = SerpFetchMeta
+
+
+# OPTIONAL: evidence structs (not strictly required, but kept for compatibility)
 class ExtractedDoc(BaseModel):
     url: str
     final_url: str
-    domain: str
-    content_type: str
     status_code: int
+    content_type: str
     text: str
-    title: Optional[str] = None
-    published_date: Optional[str] = None
+    text_chars: int
     needs_ocr: bool = False
-    text_chars: int = 0
-    error: Optional[str] = None
-
-    model_config = {"extra": "allow"}
 
 
 class EvidenceDoc(BaseModel):
-    doc_id: str
-    url: str
-    final_url: str
     domain: str
-    content_type: str
-    status_code: int
+    url: str
+    finalUrl: str
     title: Optional[str] = None
-    published_date: Optional[str] = None
-
-    text_path: Optional[str] = None
-    source_path: Optional[str] = None
-
     snippet: Optional[str] = None
-    textChars: int = 0
-    needsOcr: bool = False
-    error: Optional[str] = None
-
-    model_config = {"extra": "allow"}
-
-
-# -----------------------------
-# Backward compatibility aliases
-# -----------------------------
-# Older pipeline modules may import SerpFetchMeta. Treat it as SerpMeta.
-class SerpFetchMeta(SerpMeta):
-    pass
+    sourceQuery: Optional[str] = None
+    statusCode: int
+    contentType: str
+    textChars: int
+    needsOcr: bool
+    sourcePath: str
+    textPath: str
+    fetchedAt: str
