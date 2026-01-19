@@ -1,78 +1,289 @@
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass
+from dataclasses import asdict
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
+import json
 
-from .openai_client import chat_completion_json
 from .models import ProjectInput
-
-
-def _utc_now_iso() -> str:
-    return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
-
-
-def _valid_until_iso(days: int = 7) -> str:
-    return (datetime.utcnow() + timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+from .openai_client import openai_chat_json
+from .whitelist import host_from_url
 
 
 def _load_json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
+    return json.loads(path.read_text(encoding="utf-8", errors="replace"))
 
 
-def _store_json(path: Path, obj: Any) -> None:
-    path.write_text(json.dumps(obj, indent=2, ensure_ascii=False), encoding="utf-8")
+def _read_text_chars(text_path: str) -> int:
+    try:
+        if not text_path:
+            return 0
+        p = Path(text_path)
+        if not p.exists():
+            return 0
+        return len(p.read_text(encoding="utf-8", errors="replace"))
+    except Exception:
+        return 0
 
 
-def _pick_key_events(events: List[Dict[str, Any]], max_events: int = 10) -> List[Dict[str, Any]]:
+def _normalize_evidence(evidence_any: Any) -> List[Dict[str, Any]]:
     """
-    Picks a compact, high-signal set of events from events_deduped.json.
-    Heuristics:
-      - prefer events containing strong tags/keywords
-      - ensure date diversity
+    Normalizes evidence.json into a consistent list-of-dicts shape expected by this module.
+
+    Accepts:
+      1) Old list format: [ {id, url, finalUrl, domain, ...}, ... ]
+      2) Wide format: {"counts": {...}, "docs": [ {doc_id, url, final_url, domain, snippet, text_path}, ... ]}
+
+    Returns list items with keys (minimum):
+      - id
+      - url
+      - finalUrl
+      - domain
+      - title
+      - publishedDate
+      - snippets (list[str])
+      - textPath
+      - textChars
+      - needsOcr
     """
-    if not events:
+    # If dict -> prefer docs
+    if isinstance(evidence_any, dict):
+        if isinstance(evidence_any.get("docs"), list):
+            evidence_any = evidence_any.get("docs") or []
+        else:
+            # unknown dict shape
+            evidence_any = []
+
+    if not isinstance(evidence_any, list):
         return []
 
-    strong_terms = [
-        "registration suspended", "suspended", "show-cause", "show cause", "rejection",
-        "order", "notice", "penalty", "revoked", "extension", "adjourned", "adjournment"
-    ]
-
-    def score(e: Dict[str, Any]) -> float:
-        claim = (e.get("claim") or "").lower()
-        tags = " ".join(e.get("tags") or []).lower()
-        s = float(e.get("confidence") or 0.0)
-        boost = 0.0
-        for t in strong_terms:
-            if t in claim or t in tags:
-                boost = max(boost, 0.25)
-        # prefer later dates slightly
-        date = e.get("date") or ""
-        late = 0.05 if date.startswith("2023") or date.startswith("2024") or date.startswith("2025") else 0.0
-        return s + boost + late
-
-    ranked = sorted(events, key=lambda e: score(e), reverse=True)
-
-    selected: List[Dict[str, Any]] = []
-    used_dates = set()
-    for e in ranked:
-        d = e.get("date")
-        if not d:
+    out: List[Dict[str, Any]] = []
+    for e in evidence_any:
+        if not isinstance(e, dict):
             continue
-        # allow 1 per date first pass
-        if d in used_dates and len(used_dates) < max_events:
-            continue
-        selected.append(e)
-        used_dates.add(d)
-        if len(selected) >= max_events:
-            break
 
-    # ensure chronological order for downstream rendering
-    selected = sorted(selected, key=lambda e: e.get("date") or "")
-    return selected
+        # wide-doc keys
+        doc_id = (e.get("doc_id") or e.get("id") or "").strip()
+        url = (e.get("url") or "").strip()
+        final_url = (e.get("final_url") or e.get("finalUrl") or e.get("finalUrl".lower()) or e.get("finalUrl") or e.get("finalUrl") or "").strip()
+        # fallback to other naming
+        if not final_url:
+            final_url = (e.get("finalUrl") or e.get("final_url") or e.get("finalUrl") or url).strip()
+
+        domain = (e.get("domain") or "").strip()
+        if not domain:
+            domain = host_from_url(final_url or url or "") or ""
+
+        # old evidence may store snippets differently
+        snippet = (e.get("snippet") or "").strip()
+        snippets = e.get("snippets")
+        if isinstance(snippets, list):
+            snippets_out = [str(x) for x in snippets if str(x).strip()]
+        else:
+            snippets_out = [snippet] if snippet else []
+
+        title = (e.get("title") or "").strip()
+        published_date = e.get("publishedDate")
+
+        text_path = (e.get("text_path") or e.get("textPath") or e.get("textPath") or "").strip()
+        if not text_path:
+            # sometimes stored as text_path already normalized by your Step 6E output
+            text_path = (e.get("textPath") or "").strip()
+
+        text_chars = e.get("textChars")
+        if not isinstance(text_chars, int):
+            text_chars = _read_text_chars(text_path)
+
+        needs_ocr = bool(e.get("needsOcr", False))
+
+        # If old format already uses id/url/finalUrl, keep them
+        item = {
+            "id": doc_id,
+            "url": url,
+            "finalUrl": final_url or url,
+            "domain": domain,
+            "title": title if title else None,
+            "publishedDate": published_date if published_date else None,
+            "snippets": snippets_out,
+            "textPath": text_path if text_path else None,
+            "textChars": text_chars,
+            "needsOcr": needs_ocr,
+        }
+        # Keep any extra fields (non-breaking)
+        for k, v in e.items():
+            if k in item:
+                continue
+            item[k] = v
+
+        if item["id"]:
+            out.append(item)
+
+    return out
+
+
+def _event_evidence(ev: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Your event_extractor outputs:
+      - {"date", "claim", "confidence", "tags", "source": {...}}
+    but older code expects "evidence".
+    This helper unifies both.
+    """
+    if not isinstance(ev, dict):
+        return {}
+    ed = ev.get("evidence")
+    if isinstance(ed, dict) and ed:
+        return ed
+    sd = ev.get("source")
+    if isinstance(sd, dict) and sd:
+        return sd
+    return {}
+
+
+def _pick_primary_source(evidence: List[Dict[str, Any]], events: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Pick a primary dated source:
+    - Prefer govt/nic domains if they have dates (official status)
+    - Else pick earliest dated event source
+    """
+    # Build lookup for doc_id -> evidence
+    ev_by_id = {e.get("id"): e for e in evidence if isinstance(e, dict) and e.get("id")}
+
+    # Prefer official sources among events
+    for ev in events:
+        ed = _event_evidence(ev)
+        doc_id = ed.get("doc_id") or ed.get("docId") or ed.get("id")
+        if not doc_id:
+            continue
+        e = ev_by_id.get(doc_id)
+        if not e:
+            continue
+        dom = (e.get("domain") or host_from_url(e.get("finalUrl") or e.get("url") or "") or "").lower()
+        if dom.endswith("gov.in") or dom.endswith("nic.in"):
+            return {
+                "date": ev.get("date"),
+                "domain": dom,
+                "url": e.get("finalUrl") or e.get("url"),
+                "ref": doc_id,
+            }
+
+    # fallback: first event (already sorted in extract_events)
+    if events:
+        ev0 = events[0]
+        ed = _event_evidence(ev0)
+        doc_id = ed.get("doc_id") or ed.get("docId") or ed.get("id")
+        if doc_id and doc_id in ev_by_id:
+            e = ev_by_id[doc_id]
+            dom = (e.get("domain") or host_from_url(e.get("finalUrl") or e.get("url") or "") or "")
+            return {
+                "date": ev0.get("date"),
+                "domain": dom,
+                "url": e.get("finalUrl") or e.get("url"),
+                "ref": doc_id
+            }
+
+    return {"date": None, "domain": None, "url": None, "ref": None}
+
+
+def _domain_diversity_pack(evidence: List[Dict[str, Any]], events: List[Dict[str, Any]], max_domains: int = 6) -> Dict[str, Any]:
+    """
+    Prepare a compact pack of material for the LLM:
+    - group evidence by domain
+    - include a few snippets / titles per domain
+    - include timeline events (already snippet-backed)
+    """
+    domains: Dict[str, List[Dict[str, Any]]] = {}
+    for e in evidence:
+        if not isinstance(e, dict):
+            continue
+        dom = (e.get("domain") or "").strip().lower()
+        if not dom:
+            dom = host_from_url(e.get("finalUrl") or e.get("url") or "") or "unknown"
+        domains.setdefault(dom, []).append(e)
+
+    # Prefer official + news + rest (heuristic)
+    def dom_rank(d: str) -> int:
+        if d.endswith("gov.in") or d.endswith("nic.in"):
+            return 0
+        if any(x in d for x in [
+            "timesofindia", "indiatimes", "economictimes", "livemint", "thehindu",
+            "indianexpress", "hindustantimes", "moneycontrol", "ndtv", "indiatoday",
+            "business-standard", "financialexpress"
+        ]):
+            return 1
+        return 2
+
+    dom_list = sorted(domains.keys(), key=lambda d: (dom_rank(d), -len(domains[d]), d))[:max_domains]
+
+    ev_pack: List[Dict[str, Any]] = []
+    for d in dom_list:
+        items = domains[d]
+        items_sorted = sorted(items, key=lambda x: x.get("textChars", 0) or 0, reverse=True)[:3]
+        ev_pack.append({
+            "domain": d,
+            "items": [
+                {
+                    "id": it.get("id"),
+                    "url": it.get("finalUrl") or it.get("url"),
+                    "title": it.get("title"),
+                    "publishedDate": it.get("publishedDate"),
+                    "snippets": (it.get("snippets") or [])[:4],
+                    "needsOcr": it.get("needsOcr", False),
+                    "textChars": it.get("textChars", 0),
+                } for it in items_sorted
+            ]
+        })
+
+    # News coverage candidates
+    news_candidates: List[Dict[str, Any]] = []
+    for e in evidence:
+        if not isinstance(e, dict):
+            continue
+        dom = (e.get("domain") or "").lower()
+        if any(x in dom for x in [
+            "indiatimes", "timesofindia", "economictimes", "livemint", "thehindu",
+            "indianexpress", "hindustantimes", "moneycontrol", "ndtv", "indiatoday",
+            "business-standard", "financialexpress"
+        ]):
+            news_candidates.append({
+                "domain": dom,
+                "url": e.get("finalUrl") or e.get("url"),
+                "title": e.get("title"),
+                "publishedDate": e.get("publishedDate"),
+                "snippets": (e.get("snippets") or [])[:4],
+                "ref": e.get("id"),
+            })
+
+    # de-dupe urls
+    seen = set()
+    news_out = []
+    for n in news_candidates:
+        u = n.get("url")
+        if not u or u in seen:
+            continue
+        seen.add(u)
+        news_out.append(n)
+    news_out = news_out[:8]
+
+    timeline = []
+    for ev in events[:30]:
+        if not isinstance(ev, dict):
+            continue
+        ed = _event_evidence(ev)
+        timeline.append({
+            "date": ev.get("date"),
+            "claim": ev.get("claim"),
+            "ref": ed.get("doc_id") or ed.get("docId") or ed.get("id"),
+            "domain": ed.get("domain"),
+            "url": ed.get("final_url") or ed.get("finalUrl") or ed.get("url"),
+            "snippet": ed.get("snippet"),
+        })
+
+    return {
+        "domains": ev_pack,
+        "timeline": timeline,
+        "newsCoverageCandidates": news_out,
+    }
 
 
 def build_news_with_openai(
@@ -81,281 +292,207 @@ def build_news_with_openai(
     run_dir: Path,
     events_deduped_path: Path,
 ) -> Tuple[Path, Path, Path, Path]:
-    """
-    Generates:
-      - news.json
-      - news.html
-      - news_inputs.json
-      - news_llm_raw.json
-    """
+    run_dir = run_dir.resolve()
+
+    evidence_path = run_dir / "evidence.json"
+    evidence_any = _load_json(evidence_path) if evidence_path.exists() else []
+    evidence = _normalize_evidence(evidence_any)
+
     events = _load_json(events_deduped_path)
-    key_events = _pick_key_events(events, max_events=10)
+    if not isinstance(events, list):
+        raise RuntimeError(f"events_deduped_path must be a list JSON. Got: {type(events)}")
 
-    if not key_events:
-        # minimal fallback, still produces output files
-        news_obj = {
-            "headline": f"No verified public updates found for {project.project_name} ({project.city})",
-            "summary": "No whitelisted sources returned extractable, dated evidence in the current run.",
-            "primaryDate": None,
-            "primarySource": None,
-            "timeline": [],
-            "latestUpdate": None,
-            "buyerImplications": [
-                "Try again with additional whitelisted sources or enable OCR for scanned PDFs from RERA."
-            ],
-            "sources": [],
-            "generatedAt": _utc_now_iso(),
-            "validUntil": _valid_until_iso(7),
-        }
-        news_json = run_dir / "news.json"
-        news_html = run_dir / "news.html"
-        inputs_json = run_dir / "news_inputs.json"
-        raw_json = run_dir / "news_llm_raw.json"
-        _store_json(news_json, news_obj)
-        _store_json(inputs_json, {"project": project.model_dump(), "key_events": key_events})
-        _store_json(raw_json, {"note": "no openai call made"})
-        news_html.write_text(render_news_html(project, news_obj), encoding="utf-8")
-        return news_json, news_html, inputs_json, raw_json
+    primary = _pick_primary_source(evidence, events)
+    pack = _domain_diversity_pack(evidence, events)
 
-    # latest event = max date (lexicographically works for YYYY-MM-DD)
-    latest = sorted(key_events, key=lambda e: e["date"])[-1]
+    generated_at = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    valid_until = (datetime.utcnow().replace(microsecond=0) + timedelta(days=7)).isoformat() + "Z"
 
-    # Build a stable event list for the model with ids
-    compact_events = []
-    for i, e in enumerate(key_events, start=1):
-        compact_events.append(
-            {
-                "event_id": f"E{i}",
-                "date": e["date"],
-                "claim": e["claim"],
-                "confidence": e.get("confidence", 0.0),
-                "domain": e["evidence"]["domain"],
-                "url": e["evidence"]["final_url"],
-                "snippet": e["evidence"]["snippet"],
-            }
-        )
-
+    # ----- LLM instruction -----
     system = (
-        "You generate a real-estate 'stalled project news' object.\n"
-        "Hard rule: you MUST NOT add facts that are not directly supported by the provided event snippets.\n"
-        "Every timeline bullet, latest update line, and buyer implication MUST cite supporting_event_ids (one or more).\n"
-        "If evidence is insufficient, say 'Insufficient evidence' and still cite what exists.\n"
-        "Return ONLY valid JSON."
+        "You are generating a factual, evidence-bounded project update for a stalled/delayed real-estate project in India. "
+        "Hard rule: you MUST NOT invent facts. Every factual claim must be supported by at least one provided snippet. "
+        "If evidence is insufficient, write 'Insufficient evidence' and do not guess."
     )
 
-    user = json.dumps(
-        {
-            "project": {
-                "project_name": project.project_name,
-                "city": project.city,
-                "rera_id": project.rera_id,
-            },
-            "events": compact_events,
-            "required_output_schema": {
-                "headline": "string",
-                "summary": "string (2-3 lines, concise)",
-                "primary": {"date": "YYYY-MM-DD", "source": {"domain": "string", "url": "string"}, "supporting_event_ids": ["E1"]},
-                "timeline": [{"date": "YYYY-MM-DD", "text": "string", "supporting_event_ids": ["E1", "E2"]}],
-                "latestUpdate": {"date": "YYYY-MM-DD", "text": "string", "supporting_event_ids": ["E3"]},
-                "buyerImplications": [{"text": "string", "supporting_event_ids": ["E1"]}],
-                "sources": [{"domain": "string", "url": "string"}],
-            },
+    user = {
+        "project": {
+            "name": project.project_name,
+            "city": project.city,
+            "reraId": project.rera_id,
         },
-        ensure_ascii=False,
-        indent=2,
-    )
-
-    llm = chat_completion_json(system=system, user=user, temperature=0.2, max_tokens=1100)
-
-    # Basic validation: referenced ids must exist
-    valid_ids = {e["event_id"] for e in compact_events}
-
-    def _check_ids(where: str, ids: List[str]) -> None:
-        for x in ids:
-            if x not in valid_ids:
-                raise RuntimeError(f"Invalid supporting_event_id '{x}' in {where}. Valid={sorted(list(valid_ids))}")
-
-    # validate primary
-    primary = llm.get("primary") or {}
-    _check_ids("primary.supporting_event_ids", primary.get("supporting_event_ids") or [])
-
-    # validate timeline
-    for idx, t in enumerate(llm.get("timeline") or []):
-        _check_ids(f"timeline[{idx}].supporting_event_ids", t.get("supporting_event_ids") or [])
-
-    # validate latestUpdate
-    lu = llm.get("latestUpdate") or {}
-    _check_ids("latestUpdate.supporting_event_ids", lu.get("supporting_event_ids") or [])
-
-    # validate buyerImplications
-    for idx, b in enumerate(llm.get("buyerImplications") or []):
-        _check_ids(f"buyerImplications[{idx}].supporting_event_ids", b.get("supporting_event_ids") or [])
-
-    # Build final news object in your required schema
-    sources = []
-    seen = set()
-    for e in compact_events:
-        k = (e["domain"], e["url"])
-        if k not in seen:
-            seen.add(k)
-            sources.append({"domain": e["domain"], "url": e["url"]})
-
-    news_obj = {
-        "headline": llm.get("headline"),
-        "summary": llm.get("summary"),
-        "dateAndSource": {
-            "date": primary.get("date"),
-            "source": primary.get("source"),
-            "supportingEventIds": primary.get("supporting_event_ids"),
+        "primarySourceHint": primary,
+        "inputs": pack,
+        "outputSchema": {
+            "headline": "string",
+            "shortSummary": "2-3 line summary",
+            "detailedSummary": "500-1000 words, multi-paragraph, human-written",
+            "primaryDateSource": {"date": "YYYY-MM-DD or null", "domain": "string or null", "ref": "E# id", "url": "string"},
+            "timeline": [{"date": "YYYY-MM-DD", "event": "string", "ref": "E# id"}],
+            "latestUpdate": {"date": "YYYY-MM-DD or null", "update": "string", "ref": "E# id"},
+            "buyerImplications": ["bullets, must be grounded in evidence or clearly framed as guidance"],
+            "investorImplications": ["bullets, must be grounded in evidence or clearly framed as guidance"],
+            "newsCoverage": [{"title": "string", "date": "YYYY-MM-DD or null", "sourceDomain": "string", "ref": "E# id"}],
+            "sources": [{"ref": "E# id", "domain": "string", "urlText": "plain text only (no hyperlink)"}],
+            "generatedAt": generated_at,
+            "validUntil": valid_until
         },
-        "timeline": [
-            {
-                "date": t.get("date"),
-                "text": t.get("text"),
-                "supportingEventIds": t.get("supporting_event_ids"),
-            }
-            for t in (llm.get("timeline") or [])
+        "styleRules": [
+            "Write like a human analyst: vary sentence length, avoid generic AI phrases, be specific where evidence exists.",
+            "Do not overclaim: if only regulator records exist, say so and avoid dramatic language.",
+            "Cater to BOTH buyers and investors in separate sections.",
+            "If multiple domains exist, ensure the timeline/newsCoverage cites multiple domains (diversity) when possible."
         ],
-        "latestUpdate": {
-            "date": (llm.get("latestUpdate") or {}).get("date"),
-            "text": (llm.get("latestUpdate") or {}).get("text"),
-            "supportingEventIds": (llm.get("latestUpdate") or {}).get("supporting_event_ids"),
-        },
-        "buyerImplications": [
-            {
-                "text": b.get("text"),
-                "supportingEventIds": b.get("supporting_event_ids"),
-            }
-            for b in (llm.get("buyerImplications") or [])
+        "citationRules": [
+            "Use only refs provided in inputs.timeline (ref/doc_id) or inputs.domains.items[].id",
+            "Do not cite a ref you cannot tie to a snippet.",
         ],
-        "sources": sources,  # references only, no backlinks
-        "generatedAt": _utc_now_iso(),
-        "validUntil": _valid_until_iso(7),
-        "debug": {
-            "eventIdMap": {e["event_id"]: {"date": e["date"], "domain": e["domain"], "url": e["url"]} for e in compact_events}
-        },
     }
 
-    news_json = run_dir / "news.json"
-    news_html = run_dir / "news.html"
-    inputs_json = run_dir / "news_inputs.json"
-    raw_json = run_dir / "news_llm_raw.json"
+    news = openai_chat_json(system=system, user=json.dumps(user, ensure_ascii=False))
 
-    _store_json(inputs_json, {"project": project.model_dump(), "events": compact_events})
-    _store_json(raw_json, llm)
-    _store_json(news_json, news_obj)
+    # Collect refs used by model
+    used_refs = set()
 
-    news_html.write_text(render_news_html(project, news_obj), encoding="utf-8")
+    def _collect(obj: Any):
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                if k == "ref" and isinstance(v, str):
+                    used_refs.add(v)
+                _collect(v)
+        elif isinstance(obj, list):
+            for x in obj:
+                _collect(x)
 
-    return news_json, news_html, inputs_json, raw_json
+    _collect(news)
 
+    ev_by_id = {e.get("id"): e for e in evidence if isinstance(e, dict) and e.get("id")}
+    sources = []
+    for ref in sorted(list(used_refs)):
+        e = ev_by_id.get(ref)
+        if not e:
+            continue
+        u = e.get("finalUrl") or e.get("url")
+        dom = e.get("domain") or host_from_url(u) or ""
+        sources.append({"ref": ref, "domain": dom, "urlText": u})
 
-def render_news_html(project: ProjectInput, news: Dict[str, Any]) -> str:
-    headline = news.get("headline") or ""
-    summary = news.get("summary") or ""
-    primary = news.get("dateAndSource") or {}
-    timeline = news.get("timeline") or []
+    news["sources"] = sources
+    news["generatedAt"] = generated_at
+    news["validUntil"] = valid_until
+
+    # Save artifacts
+    out_news_json = run_dir / "news.json"
+    out_inputs_json = run_dir / "news_inputs.json"
+    out_raw_json = run_dir / "news_llm_raw.json"
+    out_html = run_dir / "news.html"
+
+    out_news_json.write_text(json.dumps(news, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    out_inputs_json.write_text(json.dumps(user, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    out_raw_json.write_text(json.dumps({"ok": True}, indent=2) + "\n", encoding="utf-8")
+
+    # HTML render (no backlinks)
+    def esc(s: Any) -> str:
+        x = "" if s is None else str(s)
+        return (x.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+    headline = esc(news.get("headline"))
+    short = esc(news.get("shortSummary"))
+    detailed = news.get("detailedSummary") or ""
+
+    paras = [p.strip() for p in str(detailed).split("\n\n") if p.strip()]
+    detailed_html = "\n".join([f"<p>{esc(p)}</p>" for p in paras])
+
+    prim = news.get("primaryDateSource") or {}
+    prim_line = f"{esc(prim.get('date'))} — {esc(prim.get('domain'))} — {esc(prim.get('url'))} ({esc(prim.get('ref'))})"
+
+    timeline_items = news.get("timeline") or []
+    timeline_html = "\n".join([f"<li><b>{esc(it.get('date'))}</b> — {esc(it.get('event'))} ({esc(it.get('ref'))})</li>" for it in timeline_items])
+
     latest = news.get("latestUpdate") or {}
-    implications = news.get("buyerImplications") or []
-    sources = news.get("sources") or []
-    gen = news.get("generatedAt") or ""
-    valid = news.get("validUntil") or ""
+    latest_html = f"<b>{esc(latest.get('date'))}</b> — {esc(latest.get('update'))} ({esc(latest.get('ref'))})"
 
-    def esc(s: str) -> str:
-        return (
-            s.replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-            .replace('"', "&quot;")
-        )
+    buyer = news.get("buyerImplications") or []
+    buyer_html = "\n".join([f"<li>{esc(x)}</li>" for x in buyer])
 
-    def fmt_ids(ids: List[str]) -> str:
-        if not ids:
-            return ""
-        return " (" + ", ".join([esc(x) for x in ids]) + ")"
+    investor = news.get("investorImplications") or []
+    investor_html = "\n".join([f"<li>{esc(x)}</li>" for x in investor])
 
-    primary_date = primary.get("date")
-    primary_source = primary.get("source") or {}
-    primary_ids = primary.get("supportingEventIds") or primary.get("supporting_event_ids") or []
+    coverage = news.get("newsCoverage") or []
+    coverage_html = "\n".join([f"<li>{esc(x.get('title'))} — {esc(x.get('sourceDomain'))} — {esc(x.get('date'))} ({esc(x.get('ref'))})</li>" for x in coverage])
 
-    html = []
-    html.append("<!doctype html>")
-    html.append("<html lang='en'>")
-    html.append("<head>")
-    html.append("<meta charset='utf-8'/>")
-    html.append("<meta name='viewport' content='width=device-width, initial-scale=1'/>")
-    html.append(f"<title>{esc(headline) or 'Stalled Project News'}</title>")
-    html.append("<style>")
-    html.append("body{font-family:Arial,Helvetica,sans-serif;margin:24px;line-height:1.45;color:#111}")
-    html.append("h1{margin:0 0 8px 0;font-size:22px}")
-    html.append(".meta{color:#555;font-size:13px;margin-bottom:14px}")
-    html.append(".card{border:1px solid #e5e5e5;border-radius:10px;padding:14px;margin:14px 0}")
-    html.append("ul{margin:8px 0 0 18px}")
-    html.append("li{margin:6px 0}")
-    html.append("code{background:#f6f6f6;padding:1px 6px;border-radius:6px}")
-    html.append("</style>")
-    html.append("</head>")
-    html.append("<body>")
+    sources_html = "\n".join([f"<li>{esc(s.get('ref'))} — {esc(s.get('domain'))} — {esc(s.get('urlText'))}</li>" for s in sources])
 
-    html.append(f"<h1>{esc(headline)}</h1>")
-    html.append(f"<div class='meta'><b>Project:</b> {esc(project.project_name)} | <b>City:</b> {esc(project.city)}"
-                + (f" | <b>RERA:</b> {esc(project.rera_id)}" if project.rera_id else "")
-                + "</div>")
+    footer = f"GeneratedAt: {esc(news.get('generatedAt'))} | ValidUntil: {esc(news.get('validUntil'))}"
 
-    html.append("<div class='card'>")
-    html.append("<b>2–3 line summary</b>")
-    html.append(f"<p>{esc(summary)}</p>")
-    html.append("</div>")
+    html = f"""<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>{headline}</title>
+  <style>
+    body {{ font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 28px; color: #111; }}
+    h1 {{ margin-bottom: 6px; }}
+    .meta {{ color: #555; margin-bottom: 18px; }}
+    .card {{ border: 1px solid #e6e6e6; border-radius: 10px; padding: 14px 16px; margin: 12px 0; }}
+    .label {{ font-weight: 700; margin-bottom: 8px; }}
+    ul {{ margin-top: 6px; }}
+    .footer {{ margin-top: 18px; color: #666; font-size: 12px; }}
+    code {{ background: #f6f6f6; padding: 2px 6px; border-radius: 6px; }}
+  </style>
+</head>
+<body>
+  <h1>{headline}</h1>
+  <div class="meta">Project: <b>{esc(project.project_name)}</b> | City: <b>{esc(project.city)}</b> | RERA: <b>{esc(project.rera_id)}</b></div>
 
-    html.append("<div class='card'>")
-    html.append("<b>Date and Source (Primary)</b>")
-    if primary_date and primary_source.get("domain") and primary_source.get("url"):
-        html.append(f"<p><b>{esc(primary_date)}</b> — {esc(primary_source['domain'])} | <span style='color:#555'>{esc(primary_source['url'])}</span>{fmt_ids(primary_ids)}</p>")
-    else:
-        html.append("<p>Insufficient evidence.</p>")
-    html.append("</div>")
+  <div class="card">
+    <div class="label">2–3 line summary</div>
+    <div>{short}</div>
+  </div>
 
-    html.append("<div class='card'>")
-    html.append("<b>Timeline of key events</b>")
-    if timeline:
-        html.append("<ul>")
-        for t in timeline:
-            html.append(f"<li><b>{esc(t.get('date') or '')}</b> — {esc(t.get('text') or '')}{fmt_ids(t.get('supportingEventIds') or [])}</li>")
-        html.append("</ul>")
-    else:
-        html.append("<p>Insufficient evidence.</p>")
-    html.append("</div>")
+  <div class="card">
+    <div class="label">Detailed summary</div>
+    {detailed_html}
+  </div>
 
-    html.append("<div class='card'>")
-    html.append("<b>Latest update</b>")
-    if latest.get("date") and latest.get("text"):
-        html.append(f"<p><b>{esc(latest.get('date'))}</b> — {esc(latest.get('text'))}{fmt_ids(latest.get('supportingEventIds') or [])}</p>")
-    else:
-        html.append("<p>Insufficient evidence.</p>")
-    html.append("</div>")
+  <div class="card">
+    <div class="label">Date and Source (Primary)</div>
+    <div><code>{prim_line}</code></div>
+  </div>
 
-    html.append("<div class='card'>")
-    html.append("<b>What it means for buyers</b>")
-    if implications:
-        html.append("<ul>")
-        for b in implications:
-            html.append(f"<li>{esc(b.get('text') or '')}{fmt_ids(b.get('supportingEventIds') or [])}</li>")
-        html.append("</ul>")
-    else:
-        html.append("<p>Insufficient evidence.</p>")
-    html.append("</div>")
+  <div class="card">
+    <div class="label">Timeline of key events</div>
+    <ul>{timeline_html}</ul>
+  </div>
 
-    html.append("<div class='card'>")
-    html.append("<b>Sources (references only)</b>")
-    if sources:
-        html.append("<ul>")
-        for s in sources:
-            html.append(f"<li>{esc(s.get('domain') or '')} — <span style='color:#555'>{esc(s.get('url') or '')}</span></li>")
-        html.append("</ul>")
-    else:
-        html.append("<p>No sources.</p>")
-    html.append("</div>")
+  <div class="card">
+    <div class="label">Latest update</div>
+    <div>{latest_html}</div>
+  </div>
 
-    html.append(f"<div class='meta'>GeneratedAt: <code>{esc(gen)}</code> | ValidUntil: <code>{esc(valid)}</code></div>")
-    html.append("</body></html>")
-    return "\n".join(html)
+  <div class="card">
+    <div class="label">What it means for buyers</div>
+    <ul>{buyer_html}</ul>
+  </div>
+
+  <div class="card">
+    <div class="label">What it means for investors</div>
+    <ul>{investor_html}</ul>
+  </div>
+
+  <div class="card">
+    <div class="label">News coverage (references only)</div>
+    <ul>{coverage_html}</ul>
+  </div>
+
+  <div class="card">
+    <div class="label">Sources (references only, no backlinks)</div>
+    <ul>{sources_html}</ul>
+  </div>
+
+  <div class="footer">{footer}</div>
+</body>
+</html>
+"""
+    out_html.write_text(html, encoding="utf-8")
+
+    return out_news_json, out_html, out_inputs_json, out_raw_json
