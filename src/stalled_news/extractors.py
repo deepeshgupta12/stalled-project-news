@@ -1,79 +1,104 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Optional
 
-import fitz  # pymupdf
-import trafilatura
-from trafilatura.metadata import extract_metadata
+from .models import ExtractedDoc
 
 
-@dataclass(frozen=True)
-class ExtractedDoc:
-    title: Optional[str]
-    published_date: Optional[str]  # keep as ISO-ish string if available
-    text: str
-    needs_ocr: bool = False
-
-
-def extract_from_html(html_bytes: bytes, url: str) -> ExtractedDoc:
-    html = html_bytes.decode("utf-8", errors="replace")
-    downloaded = trafilatura.extract(
-        html,
-        url=url,
-        include_comments=False,
-        include_tables=True,
-        include_links=False,
-        favor_precision=True,
-    )
-    text = (downloaded or "").strip()
-
-    md = extract_metadata(html, default_url=url)
-    title = getattr(md, "title", None) if md else None
-    date = getattr(md, "date", None) if md else None
-
-    published = str(date) if date else None
-    return ExtractedDoc(title=title, published_date=published, text=text, needs_ocr=False)
-
-
-def _parse_pdf_date(s: Optional[str]) -> Optional[str]:
-    # Common PDF metadata format: D:YYYYMMDDHHmmSS+05'30'
-    if not s:
-        return None
-    s = str(s)
-    if s.startswith("D:") and len(s) >= 10:
-        y = s[2:6]
-        m = s[6:8]
-        d = s[8:10]
-        if y.isdigit() and m.isdigit() and d.isdigit():
-            return f"{y}-{m}-{d}"
-    return None
-
-
-def extract_from_pdf(pdf_bytes: bytes) -> ExtractedDoc:
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+def _safe_decode(b: bytes) -> str:
     try:
+        return b.decode("utf-8", errors="ignore")
+    except Exception:
+        return ""
+
+
+def extract_text_from_html(raw: bytes) -> ExtractedDoc:
+    """
+    HTML -> plain text.
+    Uses BeautifulSoup if available, else a very basic fallback.
+    """
+    html = _safe_decode(raw).strip()
+    if not html:
+        return ExtractedDoc(text="", text_chars=0, needs_ocr=False, content_type="text/html")
+
+    text = ""
+    title: Optional[str] = None
+
+    # Prefer bs4 if installed
+    try:
+        from bs4 import BeautifulSoup  # type: ignore
+
+        soup = BeautifulSoup(html, "html.parser")
+
+        # Title
+        t = soup.find("title")
+        if t and t.get_text(strip=True):
+            title = t.get_text(strip=True)[:300]
+
+        # Remove script/style
+        for tag in soup(["script", "style", "noscript"]):
+            tag.decompose()
+
+        text = soup.get_text(" ", strip=True)
+
+    except Exception:
+        # Fallback: strip tags crudely
+        import re
+
+        text = re.sub(r"<[^>]+>", " ", html)
+        text = " ".join(text.split())
+
+    return ExtractedDoc(
+        title=title,
+        content_type="text/html",
+        text=text,
+        text_chars=len(text),
+        needs_ocr=False,
+    )
+
+
+def extract_text_from_pdf(raw: bytes) -> ExtractedDoc:
+    """
+    PDF -> text using PyMuPDF if available.
+    If extracted text is empty, mark needs_ocr=True.
+    """
+    text = ""
+    title: Optional[str] = None
+
+    try:
+        import fitz  # PyMuPDF  # type: ignore
+
+        doc = fitz.open(stream=raw, filetype="pdf")
         parts = []
         for page in doc:
-            t = (page.get_text("text") or "").strip()
-            if not t:
-                # fallback: sometimes "blocks" captures more than plain text
-                blocks = page.get_text("blocks") or []
-                if blocks:
-                    # block tuple: (x0, y0, x1, y1, "text", block_no, block_type)
-                    t = "\n".join([b[4] for b in blocks if len(b) > 4 and isinstance(b[4], str)]).strip()
-            if t:
-                parts.append(t)
+            parts.append(page.get_text("text"))
+        text = "\n".join([p.strip() for p in parts if p and p.strip()]).strip()
 
-        text = "\n\n".join(parts).strip()
+        # Try PDF metadata title if present
+        try:
+            md = doc.metadata or {}
+            if md.get("title"):
+                title = str(md.get("title"))[:300]
+        except Exception:
+            pass
 
-        meta = doc.metadata or {}
-        title = meta.get("title") or None
-        published = _parse_pdf_date(meta.get("creationDate")) or _parse_pdf_date(meta.get("modDate"))
+    except Exception:
+        text = ""
 
-        # If still empty, likely scanned/image PDF
-        needs_ocr = (len(text) == 0)
+    needs_ocr = len(text.strip()) == 0
 
-        return ExtractedDoc(title=title, published_date=published, text=text, needs_ocr=needs_ocr)
-    finally:
-        doc.close()
+    return ExtractedDoc(
+        title=title,
+        content_type="application/pdf",
+        text=text,
+        text_chars=len(text),
+        needs_ocr=needs_ocr,
+    )
+
+
+# Backward-compatible helper (older code sometimes calls a single entry point)
+def extract_text(content_type: str, raw: bytes) -> ExtractedDoc:
+    ct = (content_type or "").lower()
+    if "pdf" in ct:
+        return extract_text_from_pdf(raw)
+    return extract_text_from_html(raw)
