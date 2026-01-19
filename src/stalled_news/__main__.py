@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from stalled_news.news_generator import build_news_with_openai
+
 from .commands import cmd_ping, cmd_check_url
 from .models import ProjectInput
 from .serp_pipeline import run_serp_search_with_debug, store_serp_run_with_debug
@@ -36,6 +38,9 @@ def build_parser() -> argparse.ArgumentParser:
     e = sub.add_parser("extract-events", help="Extract dated events from evidence.json (strict snippet-backed)")
     e.add_argument("--evidence", required=True, help="Path to evidence.json in artifacts run dir")
     e.add_argument("--min_conf", required=False, default="0.55", help="Minimum confidence threshold (default 0.55)")
+    e.add_argument("--project_name", required=False, default=None, help="Optional: project name to relevance-filter events (recommended)")
+    e.add_argument("--city", required=False, default=None, help="Optional: city to relevance-filter events")
+    e.add_argument("--rera_id", required=False, default=None, help="Optional: RERA id to relevance-filter events")
 
     n = sub.add_parser("render-news", help="Generate news.json + news.html using OpenAI (evidence-bounded)")
     n.add_argument("--project_name", required=True)
@@ -96,7 +101,13 @@ def main() -> None:
     if args.command == "extract-events":
         evp = Path(args.evidence).expanduser().resolve()
         min_conf = float(args.min_conf)
-        raw, deduped = extract_events_from_evidence(evp, min_confidence=min_conf)
+        raw, deduped = extract_events_from_evidence(
+            evp,
+            project_name=args.project_name,
+            city=args.city,
+            rera_id=args.rera_id,
+            min_confidence=min_conf,
+        )
         raw_path, deduped_path, timeline_path = store_events(evp, raw, deduped)
         print(f"events_raw: {raw_path}")
         print(f"events_deduped: {deduped_path}")
