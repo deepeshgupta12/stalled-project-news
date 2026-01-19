@@ -8,7 +8,7 @@ from typing import Any, Dict, List
 from .fetcher import fetch_url, stable_id_for_url
 from .extractors import extract_from_html, extract_from_pdf
 from .whitelist import host_from_url
-from .models import SerpRun
+from .models import SerpResult, SerpRun
 
 
 def _now_iso() -> str:
@@ -16,7 +16,30 @@ def _now_iso() -> str:
 
 
 def load_serp_run(path: Path) -> SerpRun:
-    return SerpRun.model_validate_json(path.read_text(encoding="utf-8"))
+    import json
+
+    raw = json.loads(path.read_text(encoding="utf-8"))
+
+    # serp-run-wide writes a JSON list; serp-run writes {"results":[...]}
+    if isinstance(raw, list):
+        results = []
+        for item in raw:
+            # Map wide-item keys -> SearchResult
+            results.append(
+                SerpResult(
+                    source_query=item.get("source_query") or item.get("query") or "",
+                    link=item.get("link") or item.get("url") or "",
+                    title=item.get("title"),
+                    snippet=item.get("snippet"),
+                    position=item.get("position"),
+                    domain=item.get("domain"),
+                    date=item.get("date"),
+                )
+            )
+        return SerpRun(results=results)
+
+    # Normal case (object)
+    return SerpRun.model_validate(raw)
 
 
 def make_run_dir_from_serp_results(serp_results_path: Path) -> Path:
