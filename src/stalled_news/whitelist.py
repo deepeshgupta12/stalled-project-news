@@ -1,86 +1,65 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Iterable, Optional
+from dataclasses import dataclass, field
+from typing import Iterable, Optional, Set, List
 from urllib.parse import urlparse
 
-import idna
+
+def _norm_domain(d: str) -> str:
+    return (d or "").strip().lower().rstrip(".")
 
 
-@dataclass(frozen=True)
-class WhitelistPolicy:
-    allowed_domains: set[str]
-    subdomain_allowed: set[str]
-
-    @staticmethod
-    def from_config(allowed_domains: Iterable[str], subdomain_allowed: Iterable[str]) -> "WhitelistPolicy":
-        return WhitelistPolicy(
-            allowed_domains={d.strip().lower() for d in allowed_domains if d.strip()},
-            subdomain_allowed={d.strip().lower() for d in subdomain_allowed if d.strip()},
-        )
-
-
-def _normalize_host(host: str) -> str:
-    host = host.strip().lower()
-    if host.startswith("www."):
-        host = host[4:]
-    # Convert unicode domains to ASCII punycode for consistent matching
-    try:
-        host = idna.encode(host).decode("ascii")
-    except Exception:
-        # If conversion fails, keep original lowercased
-        pass
-    return host
-
-
-def host_from_url(url: str) -> Optional[str]:
-    if not url or not isinstance(url, str):
-        return None
-    u = url.strip()
-    # urlparse needs scheme to parse netloc reliably
+def host_from_url(url: str) -> str:
+    """
+    Robust host extraction (no scheme -> still try).
+    Returns lowercase host without trailing dot.
+    """
+    u = (url or "").strip()
+    if not u:
+        return ""
     if "://" not in u:
-        u = "http://" + u
-    p = urlparse(u)
-    if not p.netloc:
-        return None
-    host = p.hostname or ""
-    host = _normalize_host(host)
-    return host or None
+        u = "https://" + u
+    try:
+        host = urlparse(u).hostname or ""
+    except Exception:
+        host = ""
+    return _norm_domain(host)
 
 
-def is_domain_allowed(host: str, policy: WhitelistPolicy) -> bool:
+@dataclass
+class WhitelistPolicy:
     """
-    Exact-domain matching by default.
-    Subdomain matching is allowed only when the parent domain is in policy.subdomain_allowed.
+    allowed_domains:
+      Exact domains allowed (e.g. "haryanarera.gov.in", "www.magicbricks.com")
 
-    Examples:
-      - host = "economictimes.indiatimes.com" allowed if exact in allowed_domains
-      - host = "foo.gov.in" allowed if "gov.in" in subdomain_allowed and "gov.in" in allowed_domains
+    allow_subdomains_for:
+      Base domains for which any subdomain is allowed.
+      Example: ["gov.in"] would allow foo.gov.in, bar.gov.in, etc.
+      Keep this list tight to avoid junk.
     """
-    if not host:
-        return False
-
-    host = _normalize_host(host)
-
-    # Exact match first
-    if host in policy.allowed_domains:
-        return True
-
-    # Subdomain allowance only for configured parent domains
-    for parent in policy.subdomain_allowed:
-        parent = parent.strip().lower()
-        if not parent:
-            continue
-        if parent not in policy.allowed_domains:
-            continue
-        if host.endswith("." + parent):
-            return True
-
-    return False
+    allowed_domains: Set[str] = field(default_factory=set)
+    allow_subdomains_for: List[str] = field(default_factory=list)
 
 
 def is_url_allowed(url: str, policy: WhitelistPolicy) -> bool:
+    """
+    Returns True if URL host is allowed by:
+      - exact match in allowed_domains, OR
+      - subdomain match for any base in allow_subdomains_for
+    """
     host = host_from_url(url)
     if not host:
         return False
-    return is_domain_allowed(host, policy)
+
+    allowed = {_norm_domain(d) for d in (policy.allowed_domains or set()) if _norm_domain(d)}
+    if host in allowed:
+        return True
+
+    sub_ok = [_norm_domain(d) for d in (policy.allow_subdomains_for or []) if _norm_domain(d)]
+    for base in sub_ok:
+        if host == base:
+            return True
+        if host.endswith("." + base):
+            return True
+
+    return False
