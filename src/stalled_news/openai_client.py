@@ -9,7 +9,6 @@ from dotenv import load_dotenv
 
 
 def _load_env() -> None:
-    # Keep it robust even if caller didn't load env
     load_dotenv(".env", override=True)
 
 
@@ -36,17 +35,26 @@ def chat_completion_json(
 ) -> Dict[str, Any]:
     """
     Calls OpenAI Chat Completions API (HTTP) and expects JSON object response.
+    Ensures 'json' appears in messages to satisfy API requirement for json_object.
     """
     key = openai_api_key()
     model = openai_model()
+
+    system2 = system
+    if "json" not in system2.lower():
+        system2 = system2 + "\n\nReturn a valid JSON object only."
+
+    user2 = user
+    if "json" not in user2.lower():
+        user2 = "Return JSON only.\n" + user2
 
     payload = {
         "model": model,
         "temperature": temperature,
         "max_tokens": max_tokens,
         "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
+            {"role": "system", "content": system2},
+            {"role": "user", "content": user2},
         ],
         "response_format": {"type": "json_object"},
     }
@@ -69,10 +77,6 @@ def chat_completion_json(
         raise RuntimeError(f"Model did not return valid JSON. Error={e}. Content={content[:500]}") from e
 
 
-# ------------------------------------------------------------
-# Backward-compatible JSON chat helper
-# Used by news_generator.py (expects openai_chat_json)
-# ------------------------------------------------------------
 def openai_chat_json(
     *,
     system: str,
@@ -82,14 +86,11 @@ def openai_chat_json(
     max_tokens: int = 1400,
 ) -> Dict[str, Any]:
     """
-    Calls OpenAI chat and returns a parsed JSON object.
-    Strict contract: return dict or raise.
-
-    Loads .env automatically.
+    Calls OpenAI SDK chat and returns a parsed JSON object.
+    Ensures 'json' appears in messages to satisfy API requirement for json_object.
     """
     _load_env()
 
-    # Lazy import so non-OpenAI commands don't fail if SDK isn't present
     from openai import OpenAI
 
     api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
@@ -98,6 +99,14 @@ def openai_chat_json(
 
     m = (model or (os.getenv("OPENAI_MODEL") or "").strip() or "gpt-4.1-mini").strip()
 
+    system2 = system
+    if "json" not in system2.lower():
+        system2 = system2 + "\n\nReturn a valid JSON object only."
+
+    user2 = user
+    if "json" not in user2.lower():
+        user2 = "Return JSON only.\n" + user2
+
     client = OpenAI(api_key=api_key)
 
     resp = client.chat.completions.create(
@@ -105,8 +114,8 @@ def openai_chat_json(
         temperature=temperature,
         max_tokens=max_tokens,
         messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
+            {"role": "system", "content": system2},
+            {"role": "user", "content": user2},
         ],
         response_format={"type": "json_object"},
     )
