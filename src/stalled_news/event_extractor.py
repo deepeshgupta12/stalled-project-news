@@ -1,266 +1,302 @@
-from __future__ import annotations
-
 import json
 import re
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
-from .events import EvidenceRef, TimelineEvent
+import dateparser
+
+
+@dataclass
+class EvidenceRef:
+    doc_id: str
+    url: str
+    final_url: str
+    domain: str
+    snippet: str
+    text_path: str
+
+
+@dataclass
+class TimelineEvent:
+    date: str  # ISO yyyy-mm-dd
+    claim: str
+    confidence: float
+    tags: List[str]
+    evidence: EvidenceRef
 
 
 DATE_PATTERNS = [
-    # 27.06.2022, 27-06-2022
-    re.compile(r"\b(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{4})\b"),
-    # 27 Jun 2022, 27 June 2022
-    re.compile(r"\b(\d{1,2})\s+(Jan|January|Feb|February|Mar|March|Apr|April|May|Jun|June|Jul|July|Aug|August|Sep|September|Oct|October|Nov|November|Dec|December)\s+(\d{4})\b", re.I),
-    # 2022-06-27
-    re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b"),
+    # dd.mm.yyyy or dd-mm-yyyy or dd/mm/yyyy
+    re.compile(r"\b([0-3]?\d)[./-]([01]?\d)[./-]((?:19|20)\d{2})\b"),
+    # yyyy-mm-dd
+    re.compile(r"\b((?:19|20)\d{2})-([01]\d)-([0-3]\d)\b"),
+    # Month dd, yyyy
+    re.compile(r"\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+([0-3]?\d)(?:st|nd|rd|th)?,\s+((?:19|20)\d{2})\b", re.I),
+    # dd Month yyyy
+    re.compile(r"\b([0-3]?\d)\s+(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+((?:19|20)\d{2})\b", re.I),
 ]
 
-MONTH_MAP = {
-    "jan": "01", "january": "01",
-    "feb": "02", "february": "02",
-    "mar": "03", "march": "03",
-    "apr": "04", "april": "04",
-    "may": "05",
-    "jun": "06", "june": "06",
-    "jul": "07", "july": "07",
-    "aug": "08", "august": "08",
-    "sep": "09", "september": "09",
-    "oct": "10", "october": "10",
-    "nov": "11", "november": "11",
-    "dec": "12", "december": "12",
+KEYWORD_TAGS = {
+    "rera": ["rera", "authority", "order", "registration", "complaint", "hearing", "adjudicating", "penalty", "revocation"],
+    "court": ["court", "high court", "supreme court", "appeal", "petition", "writ", "judgment", "order"],
+    "possession": ["possession", "handover", "delivery", "completion", "occupancy", "oc", "cc", "completion certificate", "occupancy certificate"],
+    "finance": ["escrow", "bank", "loan", "fund", "payment", "refund", "interest", "compensation"],
+    "construction": ["construction", "site", "work", "progress", "tower", "structure", "slab", "foundation", "inspection"],
+    "news": ["reported", "announced", "said", "according to", "sources", "article", "news"],
 }
 
 
-def _iso_date_from_match(m: re.Match) -> Optional[str]:
-    # Pattern 3 already YYYY-MM-DD
-    if len(m.groups()) == 3 and m.re.pattern.startswith(r"\b(\d{4})-"):
-        y, mo, d = m.group(1), m.group(2), m.group(3)
-        return f"{y}-{mo}-{d}"
+def _normalize(s: str) -> str:
+    return re.sub(r"\s+", " ", s or "").strip().lower()
 
-    # Pattern 1: DD.MM.YYYY
-    if len(m.groups()) == 3 and m.group(2).isdigit():
-        d = int(m.group(1))
-        mo = int(m.group(2))
-        y = int(m.group(3))
-        if 1 <= d <= 31 and 1 <= mo <= 12:
-            return f"{y:04d}-{mo:02d}-{d:02d}"
+
+def _to_iso(d: date) -> str:
+    return d.isoformat()
+
+
+def _parse_date_from_match(m: re.Match) -> Optional[str]:
+    txt = m.group(0)
+    dt = dateparser.parse(
+        txt,
+        settings={
+            "PREFER_DAY_OF_MONTH": "first",
+            "PREFER_DATES_FROM": "past",
+            "DATE_ORDER": "DMY",
+            "STRICT_PARSING": False,
+        },
+    )
+    if not dt:
         return None
-
-    # Pattern 2: DD Mon YYYY
-    if len(m.groups()) == 3:
-        d = int(m.group(1))
-        mon = m.group(2).strip().lower()
-        y = int(m.group(3))
-        mo = MONTH_MAP.get(mon[:3], MONTH_MAP.get(mon))
-        if mo and 1 <= d <= 31:
-            return f"{y:04d}-{int(mo):02d}-{d:02d}"
-    return None
+    return _to_iso(dt.date())
 
 
-def extract_dates(text: str) -> List[str]:
-    out: List[str] = []
+def _extract_tags(snippet: str) -> List[str]:
+    s = _normalize(snippet)
+    tags: List[str] = []
+    for tag, kws in KEYWORD_TAGS.items():
+        for kw in kws:
+            if kw in s:
+                tags.append(tag)
+                break
+    return tags or ["general"]
+
+
+def _confidence(snippet: str) -> float:
+    s = _normalize(snippet)
+    score = 0.35
+    if any(k in s for k in ["order", "hearing", "directed", "authority", "rera", "penalty", "revocation"]):
+        score += 0.25
+    if any(k in s for k in ["dated", "date", "on ", "as on"]):
+        score += 0.10
+    if len(s) > 120:
+        score += 0.10
+    if any(k in s for k in ["alleged", "rumour", "rumor"]):
+        score -= 0.10
+    return max(0.0, min(0.99, score))
+
+
+def _claim_from_snippet(snippet: str) -> str:
+    # Try to produce a human-ish claim from snippet (bounded by evidence)
+    s = re.sub(r"\s+", " ", snippet).strip()
+    return s[:420] + ("…" if len(s) > 420 else "")
+
+
+def _find_events_in_text(text: str) -> List[Tuple[str, str, float, List[str]]]:
+    """
+    Returns list of (iso_date, snippet, confidence, tags)
+    Snippet must be present in normalized text (checked later).
+    """
+    norm_text = " ".join(text.split())
+    events: List[Tuple[str, str, float, List[str]]] = []
+
     for pat in DATE_PATTERNS:
-        for m in pat.finditer(text):
-            iso = _iso_date_from_match(m)
-            if iso:
-                out.append(iso)
-    # stable unique order
-    seen = set()
-    uniq = []
-    for d in out:
-        if d not in seen:
-            seen.add(d)
-            uniq.append(d)
-    return uniq
+        for m in pat.finditer(norm_text):
+            iso = _parse_date_from_match(m)
+            if not iso:
+                continue
+
+            # Context window around the date mention
+            start = max(0, m.start() - 220)
+            end = min(len(norm_text), m.end() + 220)
+            window = norm_text[start:end].strip()
+
+            # Snippet: keep a compact window (try to cut at sentence boundaries)
+            snippet = window
+            # crude sentence cut
+            if "." in window:
+                parts = window.split(".")
+                # take up to 2 sentence chunks
+                snippet = ".".join(parts[:2]).strip()
+                if len(snippet) < 40 and len(parts) > 2:
+                    snippet = ".".join(parts[:3]).strip()
+            snippet = snippet[:520].strip()
+            if len(snippet) < 30:
+                continue
+
+            tags = _extract_tags(snippet)
+            conf = _confidence(snippet)
+
+            events.append((iso, snippet, conf, tags))
+
+    return events
 
 
-def _read_text_len(text_path: str) -> int:
-    try:
-        p = Path(text_path)
-        if not p.exists():
-            return 0
-        return len(p.read_text(encoding="utf-8", errors="ignore"))
-    except Exception:
-        return 0
+def load_text(path_str: str) -> str:
+    p = Path(path_str)
+    if not p.exists():
+        return ""
+    return p.read_text(encoding="utf-8", errors="replace")
 
 
-def _normalize_evidence_item(raw: Dict[str, Any]) -> Dict[str, Any]:
+def load_evidence(evidence_path: Path) -> List[Dict[str, Any]]:
     """
-    Supports both:
-      - old evidence list items: {id,url,finalUrl,domain,textPath,textChars,snippet}
-      - new evidence docs items: {doc_id,url,final_url,domain,text_path,snippet}
+    Compatibility loader:
+    - Old format: a list[dict]
+    - New format (Step 6E wide): {"counts": {...}, "docs": [ {doc_id, url, final_url, domain, snippet, text_path}, ... ]}
+    Converts new format into the old per-doc dict shape used by the extractor.
     """
-    doc_id = raw.get("doc_id") or raw.get("id") or ""
-    url = raw.get("url") or ""
-    final_url = raw.get("final_url") or raw.get("finalUrl") or url
-    domain = raw.get("domain") or ""
-    text_path = raw.get("text_path") or raw.get("textPath") or ""
-    snippet = raw.get("snippet") or ""
-
-    text_chars = raw.get("textChars")
-    if text_chars is None and text_path:
-        text_chars = _read_text_len(text_path)
-    if text_chars is None:
-        text_chars = 0
-
-    return {
-        "doc_id": str(doc_id),
-        "url": str(url),
-        "final_url": str(final_url),
-        "domain": str(domain),
-        "text_path": str(text_path),
-        "textChars": int(text_chars),
-        "snippet": str(snippet),
-    }
-
-
-def load_evidence_items(evidence_path: Path) -> List[Dict[str, Any]]:
     data = json.loads(evidence_path.read_text(encoding="utf-8"))
 
-    # old: list
     if isinstance(data, list):
-        raw_items = data
+        return data
 
-    # new: dict with docs
-    elif isinstance(data, dict):
-        if "docs" in data and isinstance(data["docs"], list):
-            raw_items = data["docs"]
-        elif "evidence" in data and isinstance(data["evidence"], list):
-            raw_items = data["evidence"]
-        else:
-            raise ValueError(f"Unsupported evidence.json dict shape. Keys: {list(data.keys())}")
+    if isinstance(data, dict) and isinstance(data.get("docs"), list):
+        out: List[Dict[str, Any]] = []
+        for d in data["docs"]:
+            if not isinstance(d, dict):
+                continue
+            doc_id = (d.get("doc_id") or d.get("id") or "").strip()
+            url = (d.get("url") or "").strip()
+            final_url = (d.get("final_url") or d.get("finalUrl") or url).strip()
+            domain = (d.get("domain") or "").strip()
+            snippet = (d.get("snippet") or "").strip()
+            text_path = (d.get("text_path") or d.get("textPath") or "").strip()
 
-    else:
-        raise ValueError(f"Unsupported evidence.json type: {type(data)}")
+            # Compute textChars safely (do not crash if missing)
+            text_chars = 0
+            try:
+                tp = Path(text_path) if text_path else None
+                if tp and tp.exists():
+                    text_chars = len(tp.read_text(encoding="utf-8", errors="replace"))
+            except Exception:
+                text_chars = 0
 
-    items: List[Dict[str, Any]] = []
-    for x in raw_items:
-        if isinstance(x, dict):
-            items.append(_normalize_evidence_item(x))
-    return items
+            out.append(
+                {
+                    "id": doc_id,
+                    "url": url,
+                    "finalUrl": final_url,
+                    "domain": domain,
+                    "snippet": snippet,
+                    "textPath": text_path,
+                    "textChars": text_chars,
+                    "needsOcr": False,
+                }
+            )
+        return out
 
-
-def ensure_snippet_in_text(snippet: str, full_text: str) -> bool:
-    s = " ".join(snippet.split())
-    t = " ".join(full_text.split())
-    if not s or not t:
-        return False
-    return s in t
-
-
-def _context_window(full_text: str, snippet: str, window: int = 450) -> str:
-    """
-    Pull a window around the snippet if present; fallback to first window chars.
-    """
-    if not full_text:
-        return ""
-    s = " ".join(snippet.split())
-    t = " ".join(full_text.split())
-    idx = t.find(s) if s else -1
-    if idx >= 0:
-        lo = max(0, idx - window)
-        hi = min(len(t), idx + len(s) + window)
-        return t[lo:hi]
-    return t[: min(len(t), 2 * window)]
+    raise ValueError(f"Unsupported evidence.json format at: {evidence_path}")
 
 
-def _tag_from_text(text: str) -> List[str]:
-    tags = []
-    tx = text.lower()
-    if "adjourn" in tx or "adjourned" in tx:
-        tags.append("adjourned")
-    if "hearing" in tx:
-        tags.append("hearing")
-    if "show cause" in tx or "show-cause" in tx:
-        tags.append("show-cause")
-    if "rejection" in tx:
-        tags.append("rejection")
-    if "extension" in tx:
-        tags.append("extension")
-    if "complaint" in tx:
-        tags.append("complaint")
-    if "order" in tx:
-        tags.append("order")
-    return tags
+def extract_events_from_evidence(
+    evidence_path: Path,
+    *,
+    min_confidence: float = 0.55,
+    max_events_per_doc: int = 20,
+) -> Tuple[List[TimelineEvent], List[TimelineEvent]]:
+    ev = load_evidence(evidence_path)
+    raw: List[TimelineEvent] = []
 
-
-def extract_events_from_evidence(evidence_path: Path, min_confidence: float = 0.55) -> Tuple[List[TimelineEvent], List[TimelineEvent]]:
-    evidence_items = load_evidence_items(evidence_path)
-
-    raw_events: List[TimelineEvent] = []
-
-    for e in evidence_items:
-        # If extraction produced empty/no text, skip
+    for e in ev:
+        if not isinstance(e, dict):
+            continue
         if (e.get("textChars") or 0) <= 0:
             continue
 
-        text_path = e.get("text_path") or ""
-        if not text_path:
+        text = load_text(e.get("textPath", ""))
+        if not text.strip():
             continue
 
-        try:
-            full_text = Path(text_path).read_text(encoding="utf-8", errors="ignore")
-        except Exception:
-            continue
+        found = _find_events_in_text(text)
+        found = sorted(found, key=lambda x: (-x[2], x[0]))[:max_events_per_doc]
 
-        snippet = e.get("snippet") or ""
-        # If snippet exists, ensure it appears in text (strict evidence-bounding)
-        if snippet and not ensure_snippet_in_text(snippet, full_text):
-            # still allow extraction from text (some sites modify whitespace),
-            # but lower confidence later by using context window
-            pass
+        for iso, snippet, conf, tags in found:
+            if conf < min_confidence:
+                continue
 
-        ctx = _context_window(full_text, snippet, window=600)
-        dates = extract_dates(ctx)
+            # Validate snippet exists in normalized text
+            if snippet not in " ".join(text.split()):
+                continue
 
-        # no dates => nothing to timeline
-        if not dates:
-            continue
-
-        # create one event per date using a short claim derived from context/snippet
-        for d in dates:
-            claim_src = snippet if snippet else ctx
-            claim_src = " ".join(claim_src.split())
-            claim = claim_src[:220].rstrip()
-            if len(claim_src) > 220:
-                claim += "…"
-
-            ev = TimelineEvent(
-                date=d,
-                claim=claim,
-                evidence=EvidenceRef(
-                    doc_id=e.get("doc_id") or "",
-                    url=e.get("url") or "",
-                    final_url=e.get("final_url") or (e.get("url") or ""),
-                    domain=e.get("domain") or "",
-                    snippet=snippet if snippet else claim,
-                    text_path=text_path,
-                ),
-                confidence=0.70 if snippet else 0.60,
-                tags=_tag_from_text(claim_src),
+            raw.append(
+                TimelineEvent(
+                    date=iso,
+                    claim=_claim_from_snippet(snippet),
+                    confidence=conf,
+                    tags=tags,
+                    evidence=EvidenceRef(
+                        doc_id=str(e.get("id") or ""),
+                        url=str(e.get("url") or ""),
+                        final_url=str(e.get("finalUrl") or e.get("url") or ""),
+                        domain=str(e.get("domain") or ""),
+                        snippet=snippet,
+                        text_path=str(e.get("textPath") or ""),
+                    ),
+                )
             )
 
-            if ev.confidence >= min_confidence:
-                raw_events.append(ev)
-
-    # Stronger dedupe: (date + normalized claim + final_url)
-    def key(ev: TimelineEvent) -> str:
-        c = re.sub(r"\s+", " ", ev.claim.strip().lower())
-        return f"{ev.date}|{c}|{ev.evidence.final_url}"
-
+    # Dedupe: (date + normalized claim prefix)
     seen = set()
     deduped: List[TimelineEvent] = []
-    for ev in raw_events:
-        k = key(ev)
-        if k in seen:
+    for item in sorted(raw, key=lambda x: (x.date, -x.confidence)):
+        core = _normalize(item.claim)[:160]
+        key = (item.date, core)
+        if key in seen:
             continue
-        seen.add(k)
-        deduped.append(ev)
+        seen.add(key)
+        deduped.append(item)
 
-    # sort by date asc
-    deduped.sort(key=lambda x: x.date)
-    raw_events.sort(key=lambda x: x.date)
-    return raw_events, deduped
+    deduped = sorted(deduped, key=lambda x: (x.date, -x.confidence))
+    return raw, deduped
+
+
+def store_timeline(events: List[TimelineEvent], out_path: Path) -> None:
+    payload = []
+    for e in events:
+        payload.append(
+            {
+                "date": e.date,
+                "claim": e.claim,
+                "confidence": e.confidence,
+                "tags": e.tags,
+                "source": {
+                    "domain": e.evidence.domain,
+                    "url": e.evidence.url,
+                    "final_url": e.evidence.final_url,
+                    "doc_id": e.evidence.doc_id,
+                    "text_path": e.evidence.text_path,
+                    "snippet": e.evidence.snippet,
+                },
+            }
+        )
+    out_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def store_events(raw: List[TimelineEvent], deduped: List[TimelineEvent], run_dir: Path) -> Dict[str, str]:
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    raw_path = run_dir / "events_raw.json"
+    dedup_path = run_dir / "events_deduped.json"
+    timeline_path = run_dir / "timeline.json"
+
+    store_timeline(raw, raw_path)
+    store_timeline(deduped, dedup_path)
+    store_timeline(deduped, timeline_path)
+
+    return {
+        "events_raw": str(raw_path),
+        "events_deduped": str(dedup_path),
+        "timeline": str(timeline_path),
+    }
