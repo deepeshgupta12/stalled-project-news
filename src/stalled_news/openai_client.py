@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import httpx
 from dotenv import load_dotenv
@@ -35,7 +35,7 @@ def chat_completion_json(
     timeout_s: float = 60.0,
 ) -> Dict[str, Any]:
     """
-    Calls OpenAI Chat Completions API and expects the assistant to return a JSON object only.
+    Calls OpenAI Chat Completions API (HTTP) and expects JSON object response.
     """
     key = openai_api_key()
     model = openai_model()
@@ -73,10 +73,6 @@ def chat_completion_json(
 # Backward-compatible JSON chat helper
 # Used by news_generator.py (expects openai_chat_json)
 # ------------------------------------------------------------
-import os
-import json
-from typing import Any, Dict, List, Optional
-
 def openai_chat_json(
     *,
     system: str,
@@ -87,21 +83,20 @@ def openai_chat_json(
 ) -> Dict[str, Any]:
     """
     Calls OpenAI chat and returns a parsed JSON object.
-    This function intentionally keeps a strict contract: return dict or raise.
+    Strict contract: return dict or raise.
 
-    Requires:
-      - OPENAI_API_KEY in environment
-    Optional:
-      - OPENAI_MODEL in environment (fallback)
+    Loads .env automatically.
     """
-    # Lazy import so serp commands don't fail due to OpenAI dependency
+    _load_env()
+
+    # Lazy import so non-OpenAI commands don't fail if SDK isn't present
     from openai import OpenAI
 
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
     if not api_key:
         raise RuntimeError("Missing OPENAI_API_KEY in .env")
 
-    m = model or os.getenv("OPENAI_MODEL", "").strip() or "gpt-4.1-mini"
+    m = (model or (os.getenv("OPENAI_MODEL") or "").strip() or "gpt-4.1-mini").strip()
 
     client = OpenAI(api_key=api_key)
 
