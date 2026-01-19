@@ -76,3 +76,11 @@ class EvidenceDoc(BaseModel):
     error: Optional[str] = None
 
     model_config = {"extra": "allow"}
+
+
+# -----------------------------
+# Backward compatibility aliases
+# -----------------------------
+# Older pipeline modules may import SerpFetchMeta. Treat it as SerpMeta.
+class SerpFetchMeta(SerpMeta):
+    pass
